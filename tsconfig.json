@@ -1,0 +1,23 @@
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "CommonJS",
+		"rootDir": "./src",
+		"baseUrl": "./src",
+		"types": ["node"],
+		"typeRoots": [
+			"./src/types",
+			"./node_modules/@types"
+		],
+		"paths": {
+			"*": [
+				"types/*"
+			]
+		},
+		"outDir": "./dist",
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"strict": true,
+		"skipLibCheck": true
+	}
+}

@@ -1,0 +1,26 @@
+{
+	"name": "api.hyper-tech.ch",
+	"version": "1.0.0",
+	"main": "index.js",
+	"scripts": {
+		"clean": "rimraf dist/",
+		"build": "npm run clean && tsc",
+		"watch": "npm run clean && tsc -w",
+		"start": "npm run build && node dist/app.js",
+		"dev": "ts-node-dev --respawn --transpile-only src/app.ts"
+	},
+	"author": "Ratzifutzi",
+	"license": "ISC",
+	"description": "",
+	"devDependencies": {
+		"@types/node": "^22.10.1",
+		"rimraf": "^6.0.1",
+		"ts-node-dev": "^2.0.0",
+		"typescript": "^5.7.2"
+	},
+	"dependencies": {
+		"@types/express": "^5.0.0",
+		"express": "^4.21.1",
+		"glob": "^11.0.0"
+	}
+}
