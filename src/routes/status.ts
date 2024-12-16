@@ -3,18 +3,16 @@ import { NextFunction, Request, Response } from "express";
 
 export default {
 	Method: "get",
-	Path: "/test/auth",
+	Path: "/status",
 	Priority: 0,
-
-	AuthorizationGroup: "Test",
+	
+	AuthorizationGroup: "Status",
 
 	OnRequest: function (req: Request, res: Response, next: NextFunction) {
 		res.json({
 			success: true,
-			dataType: "string[]",
-			data: [
-				"If you read this, the auth manager works and you have access to read this"
-			],
+			dataType: "null[]",
+			data: [],
 		})
 	}
 } satisfies RouteHandler

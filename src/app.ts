@@ -114,7 +114,7 @@ async function main() {
 					if (token.ExpiresAt && token.ExpiresAt instanceof Date) {
 						const currentDate = new Date();
 
-						if (currentDate < token.ExpiresAt) return;
+						if (currentDate > token.ExpiresAt) return;
 					}
 
 					// Make sure that this token has access to the

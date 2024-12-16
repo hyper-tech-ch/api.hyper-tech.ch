@@ -3,7 +3,7 @@ import { NextFunction, Request, Response } from "express";
 
 export default {
 	Method: "get",
-	Path: "/",
+	Path: "/test",
 	Priority: 0,
 
 	AuthorizationGroup: "Test",
