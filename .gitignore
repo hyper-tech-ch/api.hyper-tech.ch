@@ -1,3 +1,7 @@
+# API Tokens
+src/tokens/*
+!src/tokens/example.ts
+
 # Logs
 logs
 *.log

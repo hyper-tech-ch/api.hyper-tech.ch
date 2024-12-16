@@ -3,7 +3,7 @@ import { NextFunction, Request, Response } from "express";
 
 export default {
 	Method: "get",
-	Path: "/",
+	Path: "/auth",
 	Priority: 0,
 
 	AuthorizationGroup: "Test",
@@ -13,7 +13,7 @@ export default {
 			success: true,
 			dataType: "string[]",
 			data: [
-				"If you read this, the route handler works"
+				"If you read this, the auth manager works and you have access to read this"
 			],
 		})
 	}
