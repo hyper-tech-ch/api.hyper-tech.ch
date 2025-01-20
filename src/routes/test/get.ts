@@ -6,7 +6,7 @@ export default {
 	Path: "/test",
 	Priority: 0,
 
-	AuthorizationGroup: "Test",
+	AuthorizationGroup: null,
 
 	OnRequest: function (req: Request, res: Response, next: NextFunction) {
 		res.json({

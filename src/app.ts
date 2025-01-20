@@ -87,7 +87,7 @@ async function main() {
 		// Authorization Manager
 		// This part of the code makes sure the user
 		// has access to the content they request
-		if(route.AuthorizationGroup) {
+		if(route.AuthorizationGroup !== null) {
 			// Capture all incoming requests
 			app.use(route.Path, (req: Request, res: Response, next: NextFunction) => {
 				// Check if the request even provided authorization
@@ -119,7 +119,7 @@ async function main() {
 
 					// Make sure that this token has access to the
 					// required permissions
-					if (!token.AllowedServices.includes(route.AuthorizationGroup)) return;
+					if (!token.AllowedServices.includes(route.AuthorizationGroup as string)) return;
 
 					///////////////////////////////////////////
 

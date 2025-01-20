@@ -5,7 +5,7 @@ export type RouteHandler = {
 	Path: string;
 	Priority: number;
 
-	AuthorizationGroup: string,
+	AuthorizationGroup: string | null,
 
 	OnRequest: (req: Request, res: Response, next: NextFunction) => void;
 };
