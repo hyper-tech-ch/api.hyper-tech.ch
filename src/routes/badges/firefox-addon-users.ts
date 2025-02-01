@@ -43,6 +43,6 @@ export default {
 			cache.lastUpdate = new Date().getTime();
 		}
 
-		res.redirect( `https://img.shields.io/badge/weekly_downloads-${cache.users}-green` )
+		res.redirect( `https://img.shields.io/badge/Average_daily_users-${cache.users}-green` )
 	}
 } satisfies RouteHandler
