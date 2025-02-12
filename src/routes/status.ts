@@ -6,7 +6,7 @@ export default {
 	Path: "/status",
 	Priority: 0,
 	
-	AuthorizationGroup: null,
+	AuthorizationGroup: "Status",
 
 	OnRequest: function (req: Request, res: Response, next: NextFunction) {
 		res.json({

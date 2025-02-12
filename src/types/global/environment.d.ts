@@ -3,7 +3,6 @@ declare global {
 		interface ProcessEnv {
 			NODE_ENV: 'development' | 'production' | 'test';
 			PORT: string;
-			// Add other environment variables here
 		}
 	}
 }
