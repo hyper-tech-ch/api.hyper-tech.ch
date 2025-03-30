@@ -6,8 +6,10 @@ import { RouteHandler } from "exports/route";
 import { exit } from "process";
 import path from "path";
 import { AuthorizationToken } from "exports/token";
+import { Connect } from "./helpers/database";
 
 const express = require('express');
+require('dotenv').config();
 
 // Constants
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 80;
@@ -50,8 +52,12 @@ async function main() {
 
 	console.log("✅ Authorization indexed\n");
 
+	console.log("⌛ Connecting Database...");
+	await Connect();
+	console.log("✅ Database connected\n");
+
 	// Prepare for gathering all the routes recursively
-	console.log("⌛ Gathering routes...");
+	console.log("⌛ Gathering routes...\n");
 
 	// If it failed, stop the server since safe execution cannot be guaranteed anymore.
 	try {
@@ -146,8 +152,14 @@ async function main() {
 		}
 
 		// Link the route
-		app[route.Method](route.Path, route.OnRequest);
-		console.log(`🚀 Registered ${route.Method.toUpperCase()} route: ${route.Path}`);
+		if(!route.Middleware) {
+			app[route.Method](route.Path, route.OnRequest);
+			console.log(`🚀 Registered ${route.Method.toUpperCase()} route: ${route.Path}`);
+		} else {
+			app[route.Method](route.Path, route.Middleware, route.OnRequest);
+			console.log(`🚀 Registered ${route.Method.toUpperCase()} route: ${route.Path}`);
+			console.log(`└  Registered some middleware for this route.`);
+		}
 	});
 
 	// Logs

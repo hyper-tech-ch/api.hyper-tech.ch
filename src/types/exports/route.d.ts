@@ -7,5 +7,7 @@ export type RouteHandler = {
 
 	AuthorizationGroup: string | null,
 
+	Middleware?: any,
+
 	OnRequest: (req: Request, res: Response, next: NextFunction) => void;
 };

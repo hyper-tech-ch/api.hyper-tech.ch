@@ -1,3 +1,6 @@
+# Movies
+assets/movies/*
+
 # API Tokens
 src/tokens/*
 !src/tokens/example.ts

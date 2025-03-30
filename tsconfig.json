@@ -1,4 +1,7 @@
 {
+	"include": ["src/**/*", "emails/**/*"],
+	"exclude": ["node_modules", "dist"],
+
 	"compilerOptions": {
 		"target": "ESNext",
 		"module": "NodeNext",
