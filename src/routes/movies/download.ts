@@ -5,6 +5,7 @@ import { readDirRecursive } from "../../helpers/readDirRecursive";
 import path from "path";
 import { createReadStream, statSync } from "fs";
 import cors from "cors";
+import { sendMail } from "../../helpers/sendMail";
 
 async function findMovieFile(fileName: string): Promise<string | null> {
 	const emailsDir = path.resolve(__dirname, '../../../assets/movies');
@@ -60,7 +61,7 @@ export default {
 
 		// Set headers for the response
 		res.setHeader("Content-Type", "video/mp4");
-		res.setHeader("Content-Disposition", 'attachment; filename="movie.mp4"');
+		res.setHeader("Content-Disposition", 'attachment; filename="Heuried.mp4"');
 
 		// Lock the document to prevent further downloads
 		collection.updateOne({ token: token }, { $set: { locked: true } });
@@ -75,6 +76,13 @@ export default {
 
 			// Update the document to mark the download as completed
 			collection.updateOne({ token: token }, { $set: { downloadedAt: new Date() } });
+
+			// Send E-Mail letting the customer know the movie was downloaded
+			sendMail(
+				document.email,
+				"Ihre Bestellung: Film heruntergeladen",
+				"movie_downloaded.html"
+			);
 		});
 
 		// Listen for errors in the file stream
