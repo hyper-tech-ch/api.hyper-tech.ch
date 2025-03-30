@@ -22,7 +22,7 @@ export default {
 	AuthorizationGroup: null,
 	Middleware: [
 		cors({
-			origin: "https://hyper-tech.ch", // Allow only this origin
+			origin: "*", // Allow only this origin
 			methods: ["GET"], // Allow only GET requests
 			exposedHeaders: ["Content-Length"], // Expose headers like Content-Length
 		}),
