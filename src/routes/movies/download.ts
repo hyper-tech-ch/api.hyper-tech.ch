@@ -20,7 +20,13 @@ export default {
 	Priority: 0,
 
 	AuthorizationGroup: null,
-	Middleware: cors(),
+	Middleware: [
+		cors({
+			origin: "*", // Allow requests from any origin
+			methods: ["GET"],
+			exposedHeaders: ["Content-Disposition", "Content-Length"],
+		}),
+	],
 
 	OnRequest: async function (req: Request, res: Response, next: NextFunction) {
 		if (!req.query.token) {
