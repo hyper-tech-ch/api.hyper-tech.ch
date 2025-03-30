@@ -5,11 +5,12 @@ declare global {
 			PORT: string;
 
 			MONGO_URI: string;
-			MONGO_DB_NAME: string;
+			MONGO_DB: string;
 
 			STRIPE_SECRET_KEY: string;
 			STRIPE_PUBLIC_KEY: string;
 			STRIPE_SIGNING_SECRET: string;
+			STRIPE_MOVIE_PRODUCT_ID: string;
 
 			MAIL_USER: string;
 			MAIL_PASS: string;

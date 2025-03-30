@@ -41,7 +41,7 @@ export default {
 				const purchasedProductIds = lineItems.data.map(item => item.price?.product);
 				console.log(`Purchased Product IDs: ${purchasedProductIds}`);
 
-				if (!purchasedProductIds.includes("prod_S1pVXDLyjSLT3Y")) {
+				if (!purchasedProductIds.includes(process.env.STRIPE_MOVIE_PRODUCT_ID)) {
 					console.log("❌ Mot a movie purchase");
 					return res.status(200).json({ received: true });
 				} else {
@@ -57,6 +57,7 @@ export default {
 					await collection.insertOne({
 						email: session.customer_details.email,
 						token: token,
+						purchasedAt: new Date(),
 
 						locked: false,
 						downloadedAt: null,
