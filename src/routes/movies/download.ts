@@ -40,14 +40,14 @@ export default {
 		let document = await collection.findOne({ token: token, locked: false });
 
 		if (!document) {
-			res.status(404).json({ error: "TOKEN_INVALID" });
+			res.status(400).json({ error: "TOKEN_INVALID" });
 			return;
 		}
 
 		let file = await findMovieFile("Heuried.mp4");
 
 		if (!file) {
-			res.status(404).json({ error: "MOVIE_FILE_NOT_FOUND" });
+			res.status(500).json({ error: "MOVIE_FILE_NOT_FOUND" });
 			return;
 		}
 
