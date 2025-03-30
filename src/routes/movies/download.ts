@@ -4,6 +4,7 @@ import { GetCollection } from "../../helpers/database";
 import { readDirRecursive } from "../../helpers/readDirRecursive";
 import path from "path";
 import { createReadStream, statSync } from "fs";
+import cors from "cors";
 
 async function findMovieFile(fileName: string): Promise<string | null> {
 	const emailsDir = path.resolve(__dirname, '../../../assets/movies');
@@ -19,6 +20,13 @@ export default {
 	Priority: 0,
 
 	AuthorizationGroup: null,
+	Middleware: [
+		cors({
+			origin: "https://hyper-tech.ch", // Allow only this origin
+			methods: ["GET"], // Allow only GET requests
+			exposedHeaders: ["Content-Length"], // Expose headers like Content-Length
+		}),
+	],
 
 	OnRequest: async function (req: Request, res: Response, next: NextFunction) {
 		if (!req.query.token) {
@@ -64,7 +72,7 @@ export default {
 		fileStream.on("end", () => {
 			downloadSuccessful = true;
 			console.log(`✅ File download completed for token: ${token}`);
-			
+
 			// Update the document to mark the download as completed
 			collection.updateOne({ token: token }, { $set: { downloadedAt: new Date() } });
 		});
@@ -82,7 +90,7 @@ export default {
 		req.on("close", () => {
 			if (!downloadSuccessful) {
 				console.log(`⚠️  File download was canceled or not finished for token: ${token}`);
-				
+
 				// Unlock the document to allow further downloads
 				collection.updateOne({ token: token }, { $set: { locked: false } });
 			}
