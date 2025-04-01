@@ -12,7 +12,7 @@ async function findEmailTemplate(htmlFileName: string): Promise<string | null> {
 	return matchingFile || null;
 }
 
-export async function sendMail(to: string, subject: string, htmlFileName: string, variables?: Record<string, string> ): Promise<void> {
+export async function sendMail(to: string, subject: string, htmlFileName: string, variables?: Record<string, string> ): Promise<boolean> {
 	// Send an email using the configured SMTP server
 	console.log(`Sending email to ${to} with subject ${subject} and body ${htmlFileName}`);
 
@@ -56,8 +56,10 @@ export async function sendMail(to: string, subject: string, htmlFileName: string
 	try {
 		const info = await transporter.sendMail(mailOptions);
 		console.log(`Email sent successfully: ${info.messageId}`);
+
+		return true;
 	} catch (error: any) {
 		console.error(`Failed to send email: ${error.message}`);
-		throw error;
+		return false;
 	}
 }

@@ -64,7 +64,7 @@ export default {
 					});
 
 					// Send the link to the customer
-					sendMail(
+					let sendMailSuccess = await sendMail(
 						session.customer_details.email,
 						"Ihre Bestellung: Download Link",
 						"movie_order.html",
@@ -72,13 +72,17 @@ export default {
 							"DOWNLOAD_LINK": link,
 						}
 					);
+
+					if(sendMailSuccess) {
+						return res.status(200).json({ received: true, message: "No code was ran." });
+					} else {
+						return res.status(500).json({ received: true, message: "Error sending email." });
+					}
 				}
 
-				break;
+				return res.status(200).json({ received: true, message: "No code was executed: no customer E-Mail" });
 			default:
-				break;
+				return res.status(200).json({ received: true, message: "No code was executed." });
 		}
-		
-		return res.status(200).json({ received: true });
 	}
 } satisfies RouteHandler
