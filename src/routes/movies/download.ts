@@ -120,6 +120,17 @@ export default {
 		req.on("close", async () => {
 			if (!downloadSuccessful) {
 				logger.info("⚠️ Client disconnected before download completed.");
+
+				// Wait for a grace period (e.g., 10 seconds) before unlocking the document
+				await new Promise((resolve) => setTimeout(resolve, 10000)); // 10 seconds
+
+				if (!res.writableEnded) {
+					logger.info("✅ Client reconnected within the grace period. Continuing download.");
+					return;
+				}
+
+				// If the client did not reconnect, unlock the document
+				logger.info("⚠️ Client did not reconnect. Unlocking the document.");
 				try {
 					// Unlock the document to allow further downloads
 					await collection.updateOne({ token: token }, { $set: { locked: false } });
