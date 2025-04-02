@@ -3,10 +3,11 @@
 import { Application, NextFunction, Request, Response } from "express";
 import { readDirRecursive } from "./helpers/readDirRecursive";
 import { RouteHandler } from "exports/route";
-import { exit } from "process";
 import path from "path";
 import { AuthorizationToken } from "exports/token";
 import { Connect } from "./helpers/database";
+import { initLogger } from "./helpers/logger";
+import { ShutdownApp } from "./helpers/shutdownApp";
 
 const express = require('express');
 require('dotenv').config();
@@ -16,8 +17,6 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 80;
 
 ////////////////////////////////////////////////////////////////
 
-console.log("⚙️  Preparing to start express.js server...\n");
-
 // Create the server
 const app: Application = express();
 
@@ -26,15 +25,46 @@ async function main() {
 	let routes: RouteHandler[] = []
 	let authorizations: AuthorizationToken[] = []
 
+	// Logger
+	const logger = await initLogger();
+
+	logger.info("Preparing to start express.js server...\n");
+
+	// Verify environment variables
+	logger.info("Verifying environment variables...");
+
+	for (const envVar of [
+		"MONGO_URI",
+		"MONGO_DB",
+
+		"STRIPE_SECRET_KEY",
+		"STRIPE_PUBLIC_KEY",
+		"STRIPE_SIGNING_SECRET",
+		"STRIPE_MOVIE_PRODUCT_ID",
+
+		"SEND_MAIL",
+		"MAIL_USER",
+		"MAIL_PASS",
+		"MAIL_HOST",
+		"MAIL_PORT",
+	]) {
+		if (!process.env[envVar]) {
+			logger.error(`🛑 Missing environment variable: ${envVar}`);
+			
+			await ShutdownApp(1);
+		}
+	}
+
+
 	// Index the auth keys from all files so we can access them faster
-	console.log("⌛ Indexing Authorization Tokens...");
+	logger.info("Indexing authorization tokens...");
 
 	// If it failed, stop the server since safe execution cannot be guaranteed anymore.
 	try {
 		const files: string[] = await readDirRecursive('./dist/tokens');
 
 		for (const filePath of files) {
-			console.log("🔑 " + filePath);
+			logger.info("🔑 " + filePath);
 
 			const absolutePath = path.resolve(process.cwd(), filePath);
 			const routeModule = await import(`file://${absolutePath}`);
@@ -46,25 +76,25 @@ async function main() {
 			}
 		}
 	} catch (error) {
-		console.error('🛑 Error reading directory:', error);
-		exit(1);
+		logger.error('🛑 Error reading directory:', error)
+		await ShutdownApp(1);
 	}
 
-	console.log("✅ Authorization indexed\n");
+	logger.info("✅ Authorization indexed\n");
 
-	console.log("⌛ Connecting Database...");
+	logger.info("⌛ Connecting Database...");
 	await Connect();
-	console.log("✅ Database connected\n");
+	logger.info("✅ Database connected\n");
 
 	// Prepare for gathering all the routes recursively
-	console.log("⌛ Gathering routes...\n");
+	logger.info("⌛ Gathering routes...\n");
 
 	// If it failed, stop the server since safe execution cannot be guaranteed anymore.
 	try {
 		const files: string[] = await readDirRecursive('./dist/routes');
 
 		for (const filePath of files) {
-			console.log("🔗 " + filePath);
+			logger.info("🔗 " + filePath);
 
 			const absolutePath = path.resolve(process.cwd(), filePath);
 			const routeModule = await import(`file://${absolutePath}`);
@@ -76,28 +106,28 @@ async function main() {
 			}
 		}
 	} catch (error) {
-		console.error('🛑 Error reading directory:', error);
-		exit(1);
+		logger.error('🛑 Error reading directory:', error);
+		await ShutdownApp(1);
 	}
 
-	console.log("✅ Routes gathered\n");
+	logger.info("✅ Routes gathered\n");
 
 	// Sort the routes by priority (lowest first)
-	console.log("⌛ Sorting routes...");
+	logger.info("⌛ Sorting routes...");
 	routes.sort((a, b) => a.Priority - b.Priority);
 
-	console.log("✅ Routes sorted by priority.\n");
+	logger.info("✅ Routes sorted by priority.\n");
 
 	// Register the routes
 	routes.forEach(route => {
 		// Authorization Manager
 		// This part of the code makes sure the user
 		// has access to the content they request
-		if(route.AuthorizationGroup !== null) {
+		if (route.AuthorizationGroup !== null) {
 			// Capture all incoming requests
 			app.use(route.Path, (req: Request, res: Response, next: NextFunction) => {
 				// Check if the request even provided authorization
-				if(!req.headers["x-authorization"]) {
+				if (!req.headers["x-authorization"]) {
 					res.status(401).json({
 						success: false,
 						dataType: "string[]",
@@ -152,24 +182,25 @@ async function main() {
 		}
 
 		// Link the route
-		if(!route.Middleware) {
+		if (!route.Middleware) {
 			app[route.Method](route.Path, route.OnRequest);
-			console.log(`🚀 Registered ${route.Method.toUpperCase()} route: ${route.Path}`);
+			logger.info(`🚀 Registered ${route.Method.toUpperCase()} route: ${route.Path}`);
 		} else {
 			app[route.Method](route.Path, route.Middleware, route.OnRequest);
-			console.log(`🚀 Registered ${route.Method.toUpperCase()} route: ${route.Path}`);
-			console.log(`└  Registered some middleware for this route.`);
+			logger.info(`🚀 Registered ${route.Method.toUpperCase()} route: ${route.Path}`);
+			logger.info(`└  Registered some middleware for this route.`);
 		}
 	});
 
-	// Logs
-	app.on("listening", function () {
-		console.log(`✅ Server now running on port ${PORT}!`);
-	});
-
 	// Start the server
-	const server = app.listen(PORT)
+	const server = app.listen(PORT, () => {
+		logger.info(`Server now running on port ${PORT}!`);
+	})
 	server.timeout = 1000 * 60 * 10; // 10 minutes
+
+	server.on('error', (err: any) => {
+		logger.error('🛑 Server error:', err);
+	});
 }
 
 main();

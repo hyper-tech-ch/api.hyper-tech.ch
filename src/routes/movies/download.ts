@@ -6,6 +6,7 @@ import path from "path";
 import { createReadStream, statSync } from "fs";
 import cors from "cors";
 import { sendMail } from "../../helpers/sendMail";
+import { getLogger } from "../../helpers/logger";
 
 async function findMovieFile(fileName: string): Promise<string | null> {
 	const emailsDir = path.resolve(__dirname, '../../../assets/movies');
@@ -37,6 +38,7 @@ export default {
 
 		let token = req.query.token as string;
 		let collection = await GetCollection("movie_links");
+		const logger = getLogger();
 
 		let document = await collection.findOne({ token: token, locked: false });
 
@@ -57,6 +59,7 @@ export default {
 		res.setHeader("Content-Length", fileSize);
 
 		const fileStream = createReadStream(file);
+		logger.info(`Streaming file: ${file} to IP: ${req.ip} with token: ${token}`);
 
 		// Set headers for the response
 		res.setHeader("Content-Type", "video/mp4");
@@ -80,7 +83,7 @@ export default {
 			if (res.writableEnded && bytesStreamed === fileSize) {
 				// Ensure the response was fully sent to the client
 				downloadSuccessful = true;
-				console.log(`✅ File download completed for token: ${token}`);
+				logger.info(`✅ File download completed for token: ${token} from IP: ${req.ip}`);
 
 				try {
 					// Update the document to mark the download as completed
@@ -93,35 +96,35 @@ export default {
 						"movie_downloaded.html"
 					);
 				} catch (err) {
-					console.error("❌ Failed to update document or send email:", err);
+					logger.error("❌ Failed to update document or send email:", err, "token: ", token);
 				}
 			} else {
-				console.warn("⚠️ File stream ended, but download was incomplete.");
+				logger.info("⚠️ File stream ended, but download was incomplete.");
 			}
 		});
 
 		// Listen for errors in the file stream
 		fileStream.on("error", async (err: any) => {
-			console.error("❌ Error during file streaming:", err);
+			logger.error("❌ Error during file streaming:", err);
 			res.status(500).json({ error: "Failed to stream the file" });
 
 			// Unlock the document to allow further downloads
 			try {
 				await collection.updateOne({ token: token }, { $set: { locked: false } });
 			} catch (unlockErr) {
-				console.error("❌ Failed to unlock the document:", unlockErr);
+				logger.error("❌ Failed to unlock the document:", unlockErr);
 			}
 		});
 
 		// Listen for when the client aborts the connection
 		req.on("close", async () => {
 			if (!downloadSuccessful) {
-				console.warn("⚠️ Client disconnected before download completed.");
+				logger.info("⚠️ Client disconnected before download completed.");
 				try {
 					// Unlock the document to allow further downloads
 					await collection.updateOne({ token: token }, { $set: { locked: false } });
 				} catch (unlockErr) {
-					console.error("❌ Failed to unlock the document on client disconnect:", unlockErr);
+					logger.error("❌ Failed to unlock the document on client disconnect:", unlockErr);
 				}
 			}
 		});

@@ -15,8 +15,6 @@ async function getAddonUsers(): Promise<number> {
 		const url: string = `https://addons.mozilla.org/api/v5/addons/addon/${ADDON_ID}/`;
 		const response = await axios.get(url);
 
-		console.log(response);
-
 		if (response.status === 200) {
 			return response.data.average_daily_users;
 		} else {

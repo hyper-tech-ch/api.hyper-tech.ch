@@ -12,6 +12,7 @@ declare global {
 			STRIPE_SIGNING_SECRET: string;
 			STRIPE_MOVIE_PRODUCT_ID: string;
 
+			SEND_MAIL: "yes" | "no";
 			MAIL_USER: string;
 			MAIL_PASS: string;
 			MAIL_HOST: string;

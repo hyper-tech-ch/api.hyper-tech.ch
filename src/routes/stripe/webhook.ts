@@ -4,6 +4,7 @@ import { NextFunction, Request, Response } from "express";
 import { sendMail } from "../../helpers/sendMail";
 import Stripe from 'stripe';
 import { GetCollection } from "../../helpers/database";
+import { getLogger } from "../../helpers/logger";
 import { v1 as uuidv1 } from 'uuid';
 
 export default {
@@ -20,6 +21,7 @@ export default {
 		let event: Stripe.Event;
 		
 		const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+		const logger = getLogger();
 
 		try {
 			// Verify the webhook signature
@@ -27,7 +29,7 @@ export default {
 
 			event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
 		} catch (err: any) {
-			console.log(`Webhook signature verification failed: ${err.message}`);
+			logger.warn(`Webhook signature verification failed: ${err.message} for IP: ${req.ip}`);
 			return res.status(400).send(`Could not verify webhook signature.`);
 		}
 
@@ -35,17 +37,17 @@ export default {
 			case "checkout.session.completed":
 				const session = event.data.object as Stripe.Checkout.Session;
 
-				console.log(`Charge succeeded: ${session.customer_details?.email}`);
+				logger.info(`Charge succeeded: ${session.customer_details?.email}`);
 
 				const lineItems = await stripe.checkout.sessions.listLineItems(session.id);
 				const purchasedProductIds = lineItems.data.map(item => item.price?.product);
-				console.log(`Purchased Product IDs: ${purchasedProductIds}`);
+				logger.info(`Purchased Product IDs: ${purchasedProductIds}`);
 
 				if (!purchasedProductIds.includes(process.env.STRIPE_MOVIE_PRODUCT_ID)) {
-					console.log("❌ Mot a movie purchase");
+					logger.info("❌ Mot a movie purchase");
 					return res.status(200).json({ received: true });
 				} else {
-					console.log("✅ This is a movie purchase");
+					logger.info("✅ This is a movie purchase");
 				}
 
 				if(session.customer_details?.email) {
