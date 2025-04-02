@@ -170,35 +170,35 @@ export default {
 					// Calculate total bytes downloaded from all ranges
 					const totalBytes = totalBytesDownloaded(mergedRanges);
 
-					await collection.updateOne({ token }, { $set: { partialRanges: mergedRanges } });
-
-					// Re-fetch with updated ranges
-					const updatedDoc = await collection.findOne({ token });
-					if (!updatedDoc) return;
+					// Log progress for debugging
+					logger.debug(`Range download progress: ${totalBytes}/${fileSize} bytes (${(totalBytes / fileSize * 100).toFixed(2)}%) for token: ${token}`);
 
 					// Check for full coverage OR if total bytes downloaded matches the file size
 					// This handles cases where browsers download chunks out of order
 					const isComplete =
-						hasFullCoverage(updatedDoc.partialRanges || [], fileSize) ||
+						hasFullCoverage(mergedRanges, fileSize) ||
 						totalBytes >= fileSize;
 
-					if (isComplete) {
+					if (isComplete && !docNow.downloadedAt) {
+						// Mark as successful before updating the document
 						downloadSuccessful = true;
 						logger.info(`✅ Range-based download completed for token: ${token} from IP: ${req.ip}`);
 						logger.info(`Total bytes: ${totalBytes}, File size: ${fileSize}`);
 
+						// Update document with merged ranges AND completion status
 						try {
 							await collection.updateOne({ token }, {
 								$set: {
+									partialRanges: mergedRanges,
 									downloadedAt: new Date(),
-									locked: false // unlock after completion
+									locked: true // Keep it locked after successful download
 								}
 							});
 
 							// Only send email if it hasn't been downloaded before
-							if (!updatedDoc.downloadedAt) {
-								sendMail(updatedDoc.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
-								logger.info(`📧 Email sent to ${updatedDoc.email} for completed download`);
+							if (!docNow.downloadedAt) {
+								sendMail(docNow.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
+								logger.info(`📧 Email sent to ${docNow.email} for completed download`);
 							} else {
 								logger.info(`🔄 Download complete, but email already sent previously`);
 							}
@@ -206,8 +206,13 @@ export default {
 							logger.error("❌ Failed to update document or send email:", err);
 						}
 					} else {
-						logger.info(`⚠️ Partial content finished. Coverage so far: ${totalBytes}/${fileSize} bytes (${Math.round(totalBytes / fileSize * 100)}%)`);
-						await collection.updateOne({ token }, { $set: { locked: false } });
+						// Just update the ranges
+						await collection.updateOne({ token }, { $set: { partialRanges: mergedRanges } });
+
+						if (!isComplete) {
+							logger.info(`⚠️ Partial content finished. Coverage so far: ${totalBytes}/${fileSize} bytes (${Math.round(totalBytes / fileSize * 100)}%)`);
+							await collection.updateOne({ token }, { $set: { locked: false } });
+						}
 					}
 				} catch (err) {
 					logger.error("❌ Error updating partial ranges:", err);
