@@ -9,7 +9,7 @@ import { sendMail } from "../../helpers/sendMail";
 import { getLogger } from "../../helpers/logger";
 
 async function findMovieFile(fileName: string): Promise<string | null> {
-	const emailsDir = path.resolve(__dirname, '../../../assets/movies');
+	const emailsDir = path.resolve(__dirname, "../../../assets/movies");
 	const files = await readDirRecursive(emailsDir);
 	const matchingFile = files.find(file => path.basename(file) === fileName);
 	return matchingFile || null;
@@ -40,45 +40,45 @@ export default {
 		const token = req.query.token as string;
 		const collection = await GetCollection("movie_links");
 
-		// Check if the document is available and not locked
-		const document = await collection.findOne({ token: token, locked: false });
+		// Check document availability and lock status
+		const document = await collection.findOne({ token, locked: false });
 		if (!document) {
 			res.status(400).json({ error: "TOKEN_INVALID", message: "DOCUMENT_LOCKED" });
 			return;
 		}
 
-		// Find the movie file
+		// Locate the movie file
 		const file = await findMovieFile("Heuried.mp4");
 		if (!file) {
 			res.status(500).json({ error: "MOVIE_FILE_NOT_FOUND" });
 			return;
 		}
 
-		// Lock the document
-		await collection.updateOne({ token: token }, { $set: { locked: true } });
+		// Lock the document before streaming
+		await collection.updateOne({ token }, { $set: { locked: true } });
 
 		const fileStats = statSync(file);
 		const fileSize = fileStats.size;
 		const rangeHeader = req.headers.range;
-		let downloadSuccessful = false;
 		let bytesStreamed = 0;
+		let downloadSuccessful = false;
 
 		logger.info(`Streaming file: ${file} to IP: ${req.ip} with token: ${token}`);
 
-		// Helper to unlock if download wasn’t flagged as successful
+		// Unlock if the client disconnects and we haven't flagged success
 		req.on("close", async () => {
 			if (!downloadSuccessful) {
 				logger.info("⚠️ Client disconnected before download completed. Unlocking document to allow resume.");
 				try {
-					await collection.updateOne({ token: token }, { $set: { locked: false } });
-				} catch (unlockErr) {
-					logger.error("❌ Failed to unlock the document on client disconnect:", unlockErr);
+					await collection.updateOne({ token }, { $set: { locked: false } });
+				} catch (err) {
+					logger.error("❌ Failed to unlock the document on client disconnect:", err);
 				}
 			}
 		});
 
 		if (rangeHeader) {
-			// Partial content
+			// Handle HTTP 206 partial content
 			const [startStr, endStr] = rangeHeader.replace(/bytes=/, "").split("-");
 			const start = parseInt(startStr, 10);
 			const end = endStr ? parseInt(endStr, 10) : fileSize - 1;
@@ -93,20 +93,22 @@ export default {
 			});
 
 			const fileStream = createReadStream(file, { start, end });
+
 			fileStream.on("data", chunk => {
 				bytesStreamed += chunk.length;
 			});
 
 			logger.info(`Streaming range: ${start}-${end} (${chunkSize} bytes) to IP: ${req.ip} with token: ${token}`);
 
-			// Listen to the response "finish" to be sure everything was flushed
+			// Check on "finish" to ensure all data was flushed out
 			res.on("finish", async () => {
+				// Only send email if the entire file was downloaded in one range request
 				if (bytesStreamed === chunkSize && end === fileSize - 1) {
 					downloadSuccessful = true;
 					logger.info(`✅ Range-based download completed for token: ${token} from IP: ${req.ip}`);
 
 					try {
-						await collection.updateOne({ token: token }, { $set: { downloadedAt: new Date() } });
+						await collection.updateOne({ token }, { $set: { downloadedAt: new Date() } });
 						sendMail(document.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
 					} catch (err) {
 						logger.error("❌ Failed to update document or send email:", err, "token:", token);
@@ -120,7 +122,7 @@ export default {
 				logger.error("❌ Error during partial file streaming:", err);
 				res.status(500).json({ error: "Failed to stream the file" });
 				try {
-					await collection.updateOne({ token: token }, { $set: { locked: false } });
+					await collection.updateOne({ token }, { $set: { locked: false } });
 				} catch (unlockErr) {
 					logger.error("❌ Failed to unlock the document:", unlockErr);
 				}
@@ -128,7 +130,7 @@ export default {
 
 			fileStream.pipe(res);
 		} else {
-			// Full file download
+			// No range request => full download
 			res.setHeader("Content-Length", fileSize);
 			res.setHeader("Content-Type", "video/mp4");
 			res.setHeader("Content-Disposition", 'attachment; filename="Heuried.mp4"');
@@ -139,14 +141,15 @@ export default {
 				bytesStreamed += chunk.length;
 			});
 
-			// Use res.on("finish") to confirm all bytes are flushed
+			// "finish" fires once all data is written out
 			res.on("finish", async () => {
+				// Only send email if all file bytes were streamed
 				if (bytesStreamed === fileSize) {
 					downloadSuccessful = true;
 					logger.info(`✅ Full file download completed for token: ${token} from IP: ${req.ip}`);
 
 					try {
-						await collection.updateOne({ token: token }, { $set: { downloadedAt: new Date() } });
+						await collection.updateOne({ token }, { $set: { downloadedAt: new Date() } });
 						sendMail(document.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
 					} catch (err) {
 						logger.error("❌ Failed to update document or send email:", err, "token:", token);
@@ -160,7 +163,7 @@ export default {
 				logger.error("❌ Error during file streaming:", err);
 				res.status(500).json({ error: "Failed to stream the file" });
 				try {
-					await collection.updateOne({ token: token }, { $set: { locked: false } });
+					await collection.updateOne({ token }, { $set: { locked: false } });
 				} catch (unlockErr) {
 					logger.error("❌ Failed to unlock the document:", unlockErr);
 				}
