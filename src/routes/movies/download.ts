@@ -11,7 +11,6 @@ import { getLogger } from "../../helpers/logger";
 async function findMovieFile(fileName: string): Promise<string | null> {
 	const emailsDir = path.resolve(__dirname, '../../../assets/movies');
 	const files = await readDirRecursive(emailsDir);
-
 	const matchingFile = files.find(file => path.basename(file) === fileName);
 	return matchingFile || null;
 }
@@ -24,47 +23,62 @@ export default {
 	AuthorizationGroup: null,
 	Middleware: [
 		cors({
-			origin: "*", // Allow requests from any origin
+			origin: "*",
 			methods: ["GET"],
 			exposedHeaders: ["Content-Disposition", "Content-Length"],
 		}),
 	],
 
 	OnRequest: async function (req: Request, res: Response, next: NextFunction) {
+		const logger = getLogger();
+
 		if (!req.query.token) {
 			res.status(400).json({ error: "NO_TOKEN" });
 			return;
 		}
 
-		let token = req.query.token as string;
-		let collection = await GetCollection("movie_links");
-		const logger = getLogger();
+		const token = req.query.token as string;
+		const collection = await GetCollection("movie_links");
 
-		let document = await collection.findOne({ token: token, locked: false });
+		// Check if the document is available and not locked
+		const document = await collection.findOne({ token: token, locked: false });
 		if (!document) {
 			res.status(400).json({ error: "TOKEN_INVALID", message: "DOCUMENT_LOCKED" });
 			return;
 		}
 
-		let file = await findMovieFile("Heuried.mp4");
+		// Find the movie file
+		const file = await findMovieFile("Heuried.mp4");
 		if (!file) {
 			res.status(500).json({ error: "MOVIE_FILE_NOT_FOUND" });
 			return;
 		}
 
+		// Lock the document
+		await collection.updateOne({ token: token }, { $set: { locked: true } });
+
 		const fileStats = statSync(file);
 		const fileSize = fileStats.size;
 		const rangeHeader = req.headers.range;
-
-		// Lock the document to prevent parallel downloads
-		await collection.updateOne({ token: token }, { $set: { locked: true } });
-		logger.info(`Streaming file: ${file} to IP: ${req.ip} with token: ${token}`);
-
 		let downloadSuccessful = false;
 		let bytesStreamed = 0;
 
+		logger.info(`Streaming file: ${file} to IP: ${req.ip} with token: ${token}`);
+
+		// Helper to unlock if download wasn’t flagged as successful
+		req.on("close", async () => {
+			if (!downloadSuccessful) {
+				logger.info("⚠️ Client disconnected before download completed. Unlocking document to allow resume.");
+				try {
+					await collection.updateOne({ token: token }, { $set: { locked: false } });
+				} catch (unlockErr) {
+					logger.error("❌ Failed to unlock the document on client disconnect:", unlockErr);
+				}
+			}
+		});
+
 		if (rangeHeader) {
-			// Handle partial content
+			// Partial content
 			const [startStr, endStr] = rangeHeader.replace(/bytes=/, "").split("-");
 			const start = parseInt(startStr, 10);
 			const end = endStr ? parseInt(endStr, 10) : fileSize - 1;
@@ -79,16 +93,15 @@ export default {
 			});
 
 			const fileStream = createReadStream(file, { start, end });
-			fileStream.on("data", (chunk) => {
+			fileStream.on("data", chunk => {
 				bytesStreamed += chunk.length;
 			});
 
 			logger.info(`Streaming range: ${start}-${end} (${chunkSize} bytes) to IP: ${req.ip} with token: ${token}`);
 
-			fileStream.on("end", async () => {
-				// Ensure the entire file was streamed by checking end === fileSize - 1
-				// and that we streamed exactly chunkSize bytes, and the response wasn't closed
-				if (res.writableEnded && end === fileSize - 1 && bytesStreamed === chunkSize) {
+			// Listen to the response "finish" to be sure everything was flushed
+			res.on("finish", async () => {
+				if (bytesStreamed === chunkSize && end === fileSize - 1) {
 					downloadSuccessful = true;
 					logger.info(`✅ Range-based download completed for token: ${token} from IP: ${req.ip}`);
 
@@ -99,11 +112,11 @@ export default {
 						logger.error("❌ Failed to update document or send email:", err, "token:", token);
 					}
 				} else {
-					logger.info("⚠️ Partial stream ended, but download was incomplete.");
+					logger.info("⚠️ Partial content finished, but not the entire file.");
 				}
 			});
 
-			fileStream.on("error", async (err) => {
+			fileStream.on("error", async err => {
 				logger.error("❌ Error during partial file streaming:", err);
 				res.status(500).json({ error: "Failed to stream the file" });
 				try {
@@ -115,19 +128,20 @@ export default {
 
 			fileStream.pipe(res);
 		} else {
-			// Stream the entire file
+			// Full file download
 			res.setHeader("Content-Length", fileSize);
 			res.setHeader("Content-Type", "video/mp4");
 			res.setHeader("Content-Disposition", 'attachment; filename="Heuried.mp4"');
 
 			const fileStream = createReadStream(file);
-			fileStream.on("data", (chunk) => {
+
+			fileStream.on("data", chunk => {
 				bytesStreamed += chunk.length;
 			});
 
-			fileStream.on("end", async () => {
-				// Make sure we streamed the entire file
-				if (res.writableEnded && bytesStreamed === fileSize) {
+			// Use res.on("finish") to confirm all bytes are flushed
+			res.on("finish", async () => {
+				if (bytesStreamed === fileSize) {
 					downloadSuccessful = true;
 					logger.info(`✅ Full file download completed for token: ${token} from IP: ${req.ip}`);
 
@@ -142,7 +156,7 @@ export default {
 				}
 			});
 
-			fileStream.on("error", async (err) => {
+			fileStream.on("error", async err => {
 				logger.error("❌ Error during file streaming:", err);
 				res.status(500).json({ error: "Failed to stream the file" });
 				try {
@@ -154,18 +168,5 @@ export default {
 
 			fileStream.pipe(res);
 		}
-
-		// Listen for when the client aborts the connection
-		req.on("close", async () => {
-			if (!downloadSuccessful) {
-				logger.info("⚠️ Client disconnected before download completed. Unlocking document to allow resume.");
-
-				try {
-					await collection.updateOne({ token: token }, { $set: { locked: false } });
-				} catch (unlockErr) {
-					logger.error("❌ Failed to unlock the document on client disconnect:", unlockErr);
-				}
-			}
-		});
 	}
-} satisfies RouteHandler
+} satisfies RouteHandler;
