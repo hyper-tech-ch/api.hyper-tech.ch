@@ -83,6 +83,8 @@ export default {
 				bytesStreamed += chunk.length;
 			});
 
+			logger.info(`Streaming range: ${start}-${end} (${chunkSize} bytes) to IP: ${req.ip} with token: ${token}`);
+
 			fileStream.on("end", async () => {
 				// Ensure the entire file was streamed by checking end === fileSize - 1
 				// and that we streamed exactly chunkSize bytes, and the response wasn't closed
