@@ -57,7 +57,6 @@ export default {
 		res.setHeader("Content-Length", fileSize);
 
 		const fileStream = createReadStream(file);
-		let downloadSuccessful = false;
 
 		// Set headers for the response
 		res.setHeader("Content-Type", "video/mp4");
@@ -69,38 +68,61 @@ export default {
 		// Pipe the file stream to the response
 		fileStream.pipe(res);
 
+		let downloadSuccessful = false;
+		let bytesStreamed = 0;
+
 		// Listen for when the stream finishes successfully
-		fileStream.on("end", () => {
-			downloadSuccessful = true;
-			console.log(`✅ File download completed for token: ${token}`);
+		fileStream.on("data", (chunk) => {
+			bytesStreamed += chunk.length;
+		});
 
-			// Update the document to mark the download as completed
-			collection.updateOne({ token: token }, { $set: { downloadedAt: new Date() } });
+		fileStream.on("end", async () => {
+			if (res.writableEnded && bytesStreamed === fileSize) {
+				// Ensure the response was fully sent to the client
+				downloadSuccessful = true;
+				console.log(`✅ File download completed for token: ${token}`);
 
-			// Send E-Mail letting the customer know the movie was downloaded
-			sendMail(
-				document.email,
-				"Ihre Bestellung: Film heruntergeladen",
-				"movie_downloaded.html"
-			);
+				try {
+					// Update the document to mark the download as completed
+					await collection.updateOne({ token: token }, { $set: { downloadedAt: new Date() } });
+
+					// Send E-Mail letting the customer know the movie was downloaded
+					sendMail(
+						document.email,
+						"Ihre Bestellung: Film heruntergeladen",
+						"movie_downloaded.html"
+					);
+				} catch (err) {
+					console.error("❌ Failed to update document or send email:", err);
+				}
+			} else {
+				console.warn("⚠️ File stream ended, but download was incomplete.");
+			}
 		});
 
 		// Listen for errors in the file stream
-		fileStream.on("error", (err: any) => {
+		fileStream.on("error", async (err: any) => {
 			console.error("❌ Error during file streaming:", err);
 			res.status(500).json({ error: "Failed to stream the file" });
 
 			// Unlock the document to allow further downloads
-			collection.updateOne({ token: token }, { $set: { locked: false } });
+			try {
+				await collection.updateOne({ token: token }, { $set: { locked: false } });
+			} catch (unlockErr) {
+				console.error("❌ Failed to unlock the document:", unlockErr);
+			}
 		});
 
 		// Listen for when the client aborts the connection
-		req.on("close", () => {
+		req.on("close", async () => {
 			if (!downloadSuccessful) {
-				console.log(`⚠️  File download was canceled or not finished for token: ${token}`);
-
-				// Unlock the document to allow further downloads
-				collection.updateOne({ token: token }, { $set: { locked: false } });
+				console.warn("⚠️ Client disconnected before download completed.");
+				try {
+					// Unlock the document to allow further downloads
+					await collection.updateOne({ token: token }, { $set: { locked: false } });
+				} catch (unlockErr) {
+					console.error("❌ Failed to unlock the document on client disconnect:", unlockErr);
+				}
 			}
 		});
 	}
