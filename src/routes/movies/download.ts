@@ -41,26 +41,24 @@ function totalBytesDownloaded(ranges: Array<{ start: number; end: number }>) {
 
 // Check if the ranges cover the entire file
 function isFullyCovered(ranges: Array<{ start: number; end: number }>, fileSize: number) {
-	// Sort and merge ranges
+	// Sort and merge ranges first
 	const merged = mergeRanges(ranges);
 
-	// Check if we have downloaded at least 99.9% of the file
-	// This handles cases where the browser might not request the last few bytes
-	const downloadedBytes = totalBytesDownloaded(merged);
-	const downloadPercentage = (downloadedBytes / fileSize) * 100;
+	// Calculate total bytes downloaded
+	const totalBytes = totalBytesDownloaded(merged);
+	const downloadPercentage = (totalBytes / fileSize) * 100;
 
+	// If we've downloaded at least 99.9% of the file, consider it complete
 	if (downloadPercentage >= 99.9) {
 		return true;
 	}
 
-	// Check if there's a range starting at 0 and ending at (fileSize-1)
-	for (const range of merged) {
-		if (range.start === 0 && range.end >= fileSize - 1) {
-			return true;
-		}
+	// If there's a single range from 0 to end, it's complete
+	if (merged.length === 1 && merged[0].start === 0 && merged[0].end >= fileSize - 1) {
+		return true;
 	}
 
-	// Check if merged ranges cover the full file (no gaps)
+	// Check if merged ranges cover the full file with no gaps
 	if (merged.length > 0) {
 		if (merged[0].start !== 0) return false;
 
@@ -74,6 +72,27 @@ function isFullyCovered(ranges: Array<{ start: number; end: number }>, fileSize:
 	}
 
 	return false;
+}
+
+// Helper function to log download progress
+function logDownloadProgress(ranges: Array<{ start: number; end: number }>, fileSize: number, logger: any, token: string, reason: string) {
+	const mergedRanges = mergeRanges(ranges);
+	const totalBytes = totalBytesDownloaded(mergedRanges);
+	const progressPercentage = (totalBytes / fileSize * 100).toFixed(2);
+
+	logger.info(`📊 Download progress [${reason}]: ${totalBytes}/${fileSize} bytes (${progressPercentage}%) for token: ${token}`);
+
+	// Log details of merged ranges for debugging
+	if (mergedRanges.length > 0) {
+		logger.debug(`📊 Range details: ${mergedRanges.length} merged range(s)`);
+		mergedRanges.forEach((range, i) => {
+			const rangeSize = range.end - range.start + 1;
+			const rangePercent = (rangeSize / fileSize * 100).toFixed(2);
+			logger.debug(`📊 Range ${i + 1}: ${range.start}-${range.end} (${rangeSize} bytes, ${rangePercent}%)`);
+		});
+	}
+
+	return { totalBytes, progressPercentage };
 }
 
 async function findMovieFile(fileName: string): Promise<string | null> {
@@ -108,7 +127,7 @@ export default {
 		const token = req.query.token as string;
 		const collection = await GetCollection("movie_links");
 
-		// Check if the document is available and not locked
+		// Check if the document is available
 		let document = await collection.findOne({ token });
 
 		// If there's already a downloadedAt timestamp, the download was completed
@@ -118,8 +137,13 @@ export default {
 		}
 
 		// Check if document exists and is not locked
-		if (!document || document.locked) {
-			res.status(400).json({ error: "TOKEN_INVALID", message: "DOCUMENT_LOCKED" });
+		if (!document) {
+			res.status(400).json({ error: "TOKEN_INVALID" });
+			return;
+		}
+
+		if (document.locked) {
+			res.status(400).json({ error: "DOWNLOAD_IN_PROGRESS", message: "Another download is in progress with this token" });
 			return;
 		}
 
@@ -130,11 +154,18 @@ export default {
 			return;
 		}
 
+		// Get file stats
+		const fileStats = statSync(file);
+		const fileSize = fileStats.size;
+
+		// Log current progress before starting new stream if partial ranges exist
+		if (document.partialRanges && document.partialRanges.length > 0) {
+			logDownloadProgress(document.partialRanges, fileSize, logger, token, "RESUME");
+		}
+
 		// Lock the document to prevent parallel downloads
 		await collection.updateOne({ token }, { $set: { locked: true } });
 
-		const fileStats = statSync(file);
-		const fileSize = fileStats.size;
 		const rangeHeader = req.headers.range;
 
 		logger.info(`Streaming file: ${file} to IP: ${req.ip} with token: ${token}`);
@@ -151,8 +182,14 @@ export default {
 		// Unlock if the client disconnects and we haven't flagged success
 		req.on("close", async () => {
 			if (!downloadSuccessful) {
-				logger.info("⚠️ Client disconnected before download completed. Unlocking document to allow resume.");
 				try {
+					// Get the current document state to log progress
+					const currentDoc = await collection.findOne({ token });
+					if (currentDoc?.partialRanges) {
+						logDownloadProgress(currentDoc.partialRanges, fileSize, logger, token, "PAUSED");
+					}
+
+					logger.info("⚠️ Client disconnected before download completed. Unlocking document to allow resume.");
 					await collection.updateOne({ token }, { $set: { locked: false } });
 				} catch (err) {
 					logger.error("❌ Failed to unlock the document on client disconnect:", err);
@@ -170,6 +207,9 @@ export default {
 			const safeEnd = Math.min(end, fileSize - 1);
 			const chunkSize = safeEnd - start + 1;
 
+			// Log the specific range being requested
+			logger.info(`📥 Range request: ${start}-${safeEnd} (${chunkSize} bytes, ${(chunkSize / fileSize * 100).toFixed(2)}% of file) for token: ${token}`);
+
 			res.writeHead(206, {
 				"Content-Range": `bytes ${start}-${safeEnd}/${fileSize}`,
 				"Accept-Ranges": "bytes",
@@ -183,8 +223,6 @@ export default {
 			fileStream.on("data", chunk => {
 				bytesStreamed += chunk.length;
 			});
-
-			logger.info(`Streaming range: ${start}-${safeEnd} (${chunkSize} bytes) to IP: ${req.ip} with token: ${token}`);
 
 			// When the response is finished flushing data
 			res.on("finish", async () => {
@@ -203,11 +241,14 @@ export default {
 					// Make sure we have no duplicate or overlapping ranges
 					const mergedRanges = mergeRanges(existingRanges);
 
-					// Calculate total bytes downloaded from all ranges
-					const totalBytes = totalBytesDownloaded(mergedRanges);
-					const progressPercentage = (totalBytes / fileSize * 100).toFixed(2);
-
-					logger.debug(`Range download progress: ${totalBytes}/${fileSize} bytes (${progressPercentage}%) for token: ${token}`);
+					// Log progress after this chunk
+					const { totalBytes, progressPercentage } = logDownloadProgress(
+						mergedRanges,
+						fileSize,
+						logger,
+						token,
+						"CHUNK_COMPLETED"
+					);
 
 					// First update the ranges regardless of completion
 					await collection.updateOne(
@@ -219,8 +260,8 @@ export default {
 					if (isFullyCovered(mergedRanges, fileSize)) {
 						// Mark as successful
 						downloadSuccessful = true;
-						logger.info(`✅ Range-based download completed for token: ${token} from IP: ${req.ip}`);
-						logger.info(`Total bytes: ${totalBytes}/${fileSize} (${progressPercentage}%)`);
+						logger.info(`✅ Range-based download COMPLETED for token: ${token} from IP: ${req.ip}`);
+						logger.info(`✅ Total bytes: ${totalBytes}/${fileSize} (${progressPercentage}%)`);
 
 						// Update document with completion status and keep it locked
 						await collection.updateOne(
@@ -242,7 +283,7 @@ export default {
 						}
 					} else {
 						// Unlock for future download attempts
-						logger.info(`⚠️ Partial content finished. Coverage so far: ${totalBytes}/${fileSize} bytes (${Math.round(totalBytes / fileSize * 100)}%)`);
+						logger.info(`⏸️ Partial content stream finished. Unlocking for future download attempts.`);
 						await collection.updateOne({ token }, { $set: { locked: false } });
 					}
 				} catch (err) {
@@ -271,6 +312,7 @@ export default {
 			res.setHeader("Content-Length", fileSize);
 			res.setHeader("Content-Type", "video/mp4");
 			res.setHeader("Content-Disposition", 'attachment; filename="Heuried.mp4"');
+			logger.info(`📥 Full file download requested (${fileSize} bytes) for token: ${token}`);
 
 			const fileStream = createReadStream(file);
 
@@ -281,7 +323,8 @@ export default {
 			res.on("finish", async () => {
 				// If we streamed at least 99.9% of the file size
 				if (bytesStreamed >= (fileSize * 0.999)) {
-					logger.info(`✅ Full file download completed for token: ${token} from IP: ${req.ip}`);
+					logger.info(`✅ Full file download COMPLETED for token: ${token} from IP: ${req.ip}`);
+					logger.info(`✅ Total bytes: ${bytesStreamed}/${fileSize} (${(bytesStreamed / fileSize * 100).toFixed(2)}%)`);
 					downloadSuccessful = true;
 
 					try {
@@ -307,7 +350,7 @@ export default {
 						logger.error(`❌ Failed to update document or send email: ${err}`);
 					}
 				} else {
-					logger.info(`⚠️ Full file stream ended, but only ${bytesStreamed}/${fileSize} bytes were sent.`);
+					logger.info(`⚠️ Full file stream ended, but only ${bytesStreamed}/${fileSize} bytes were sent (${(bytesStreamed / fileSize * 100).toFixed(2)}%).`);
 					try {
 						await collection.updateOne({ token }, { $set: { locked: false } });
 					} catch (unlockErr) {
