@@ -158,19 +158,8 @@ export default {
 		const fileStats = statSync(file);
 		const fileSize = fileStats.size;
 
-		// Log current progress before starting new stream if partial ranges exist
-		if (document.partialRanges && document.partialRanges.length > 0) {
-			logDownloadProgress(document.partialRanges, fileSize, logger, token, "RESUME");
-		}
-
-		// Lock the document to prevent parallel downloads
-		await collection.updateOne({ token }, { $set: { locked: true } });
-
-		const rangeHeader = req.headers.range;
-
-		logger.info(`Streaming file: ${file} to IP: ${req.ip} with token: ${token}`);
-
-		let bytesStreamed = 0;
+		// Initialize session tracking variables
+		let bytesStreamed = 0; // Tracks bytes sent in current session
 		let downloadSuccessful = false;
 
 		// Ensure partialRanges array exists in the doc
@@ -179,20 +168,92 @@ export default {
 			await collection.updateOne({ token }, { $set: { partialRanges: [] } });
 		}
 
-		// Unlock if the client disconnects and we haven't flagged success
+		// Calculate existing download progress
+		const existingRanges = document.partialRanges;
+		const existingBytes = totalBytesDownloaded(existingRanges);
+		const existingPercentage = (existingBytes / fileSize * 100).toFixed(2);
+
+		// Log current progress before starting new stream if partial ranges exist
+		if (existingRanges.length > 0) {
+			logger.info(`📊 Resuming download at ${existingBytes}/${fileSize} bytes (${existingPercentage}%) for token: ${token}`);
+		} else {
+			logger.info(`📊 Starting new download (0%) for token: ${token}`);
+		}
+
+		// Lock the document to prevent parallel downloads
+		await collection.updateOne({ token }, { $set: { locked: true } });
+
+		const rangeHeader = req.headers.range;
+
+		// Create a PassThrough stream to monitor bytes as they are sent
+		let chunksSent = 0; // Track number of chunks for debugging
+
+		// Handle client disconnection (paused download)
 		req.on("close", async () => {
 			if (!downloadSuccessful) {
 				try {
-					// Get the current document state to log progress
+					// Get current document state
 					const currentDoc = await collection.findOne({ token });
-					if (currentDoc?.partialRanges) {
-						logDownloadProgress(currentDoc.partialRanges, fileSize, logger, token, "PAUSED");
+					if (!currentDoc) {
+						logger.error("❌ Document missing on client disconnect");
+						return;
+					}
+
+					// Extract the relevant range info from current session
+					const start = rangeHeader
+						? parseInt(rangeHeader.replace(/bytes=/, "").split("-")[0], 10)
+						: 0;
+
+					// Calculate how much we sent in this session before disconnect
+					const currentEnd = start + bytesStreamed - 1;
+
+					// Only add the range if we actually sent data
+					if (bytesStreamed > 0) {
+						// Add the range that was successfully sent in this session
+						const currentRanges = currentDoc.partialRanges || [];
+						currentRanges.push({ start, end: currentEnd });
+
+						// Merge overlapping ranges
+						const mergedRanges = mergeRanges(currentRanges);
+
+						// Update the document with the new partial ranges
+						await collection.updateOne(
+							{ token },
+							{ $set: { partialRanges: mergedRanges } }
+						);
+
+						// Log progress including this session
+						logDownloadProgress(
+							mergedRanges,
+							fileSize,
+							logger,
+							token,
+							`PAUSED (sent ${bytesStreamed} bytes this session)`
+						);
+					} else {
+						// No data was sent this session
+						logger.info(`⚠️ Client disconnected before any bytes were sent this session.`);
+						if (currentDoc.partialRanges && currentDoc.partialRanges.length > 0) {
+							logDownloadProgress(
+								currentDoc.partialRanges,
+								fileSize,
+								logger,
+								token,
+								"PAUSED (unchanged)"
+							);
+						}
 					}
 
 					logger.info("⚠️ Client disconnected before download completed. Unlocking document to allow resume.");
 					await collection.updateOne({ token }, { $set: { locked: false } });
 				} catch (err) {
-					logger.error("❌ Failed to unlock the document on client disconnect:", err);
+					logger.error(`❌ Failed to handle client disconnect: ${err}`);
+					// Try to unlock the document anyway
+					try {
+						await collection.updateOne({ token }, { $set: { locked: false } });
+					} catch (unlockErr) {
+						logger.error(`❌ Failed to unlock document: ${unlockErr}`);
+					}
 				}
 			}
 		});
@@ -220,8 +281,15 @@ export default {
 
 			const fileStream = createReadStream(file, { start, end: safeEnd });
 
+			// Track bytes sent in this session
 			fileStream.on("data", chunk => {
 				bytesStreamed += chunk.length;
+				chunksSent++;
+
+				// Log progress every 50MB (helps track progress for large files)
+				if (bytesStreamed % (50 * 1024 * 1024) < chunk.length) {
+					logger.debug(`📦 Sent ${(bytesStreamed / (1024 * 1024)).toFixed(2)}MB in ${chunksSent} chunks this session`);
+				}
 			});
 
 			// When the response is finished flushing data
@@ -234,56 +302,65 @@ export default {
 						return;
 					}
 
-					// Record the served range in document
-					const existingRanges = docNow.partialRanges || [];
-					existingRanges.push({ start, end: safeEnd });
+					// Calculate actual range sent in this session
+					const actualEnd = start + bytesStreamed - 1;
 
-					// Make sure we have no duplicate or overlapping ranges
-					const mergedRanges = mergeRanges(existingRanges);
+					// Only process if we actually sent some bytes
+					if (bytesStreamed > 0) {
+						// Record the served range in document
+						const existingRanges = docNow.partialRanges || [];
+						existingRanges.push({ start, end: actualEnd });
 
-					// Log progress after this chunk
-					const { totalBytes, progressPercentage } = logDownloadProgress(
-						mergedRanges,
-						fileSize,
-						logger,
-						token,
-						"CHUNK_COMPLETED"
-					);
+						// Make sure we have no duplicate or overlapping ranges
+						const mergedRanges = mergeRanges(existingRanges);
 
-					// First update the ranges regardless of completion
-					await collection.updateOne(
-						{ token },
-						{ $set: { partialRanges: mergedRanges } }
-					);
-
-					// Check if download is complete
-					if (isFullyCovered(mergedRanges, fileSize)) {
-						// Mark as successful
-						downloadSuccessful = true;
-						logger.info(`✅ Range-based download COMPLETED for token: ${token} from IP: ${req.ip}`);
-						logger.info(`✅ Total bytes: ${totalBytes}/${fileSize} (${progressPercentage}%)`);
-
-						// Update document with completion status and keep it locked
-						await collection.updateOne(
-							{ token },
-							{
-								$set: {
-									downloadedAt: new Date(),
-									locked: true // Lock permanently after successful download
-								}
-							}
+						// Log progress after this chunk
+						const { totalBytes, progressPercentage } = logDownloadProgress(
+							mergedRanges,
+							fileSize,
+							logger,
+							token,
+							`SESSION COMPLETED (sent ${bytesStreamed} bytes)`
 						);
 
-						// Send email notification
-						try {
-							sendMail(docNow.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
-							logger.info(`📧 Email sent to ${docNow.email} for completed download`);
-						} catch (emailErr) {
-							logger.error(`❌ Failed to send email: ${emailErr}`);
+						// First update the ranges regardless of completion
+						await collection.updateOne(
+							{ token },
+							{ $set: { partialRanges: mergedRanges } }
+						);
+
+						// Check if download is complete
+						if (isFullyCovered(mergedRanges, fileSize)) {
+							// Mark as successful
+							downloadSuccessful = true;
+							logger.info(`✅ Range-based download COMPLETED for token: ${token} from IP: ${req.ip}`);
+							logger.info(`✅ Total bytes: ${totalBytes}/${fileSize} (${progressPercentage}%)`);
+
+							// Update document with completion status and keep it locked
+							await collection.updateOne(
+								{ token },
+								{
+									$set: {
+										downloadedAt: new Date(),
+										locked: true // Lock permanently after successful download
+									}
+								}
+							);
+
+							// Send email notification
+							try {
+								sendMail(docNow.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
+								logger.info(`📧 Email sent to ${docNow.email} for completed download`);
+							} catch (emailErr) {
+								logger.error(`❌ Failed to send email: ${emailErr}`);
+							}
+						} else {
+							// Unlock for future download attempts
+							logger.info(`⏸️ Session completed but download incomplete. Unlocking for future download attempts.`);
+							await collection.updateOne({ token }, { $set: { locked: false } });
 						}
 					} else {
-						// Unlock for future download attempts
-						logger.info(`⏸️ Partial content stream finished. Unlocking for future download attempts.`);
+						logger.info(`⚠️ Session ended without sending any bytes. Unlocking document.`);
 						await collection.updateOne({ token }, { $set: { locked: false } });
 					}
 				} catch (err) {
@@ -316,8 +393,15 @@ export default {
 
 			const fileStream = createReadStream(file);
 
+			// Track progress of continuous download
 			fileStream.on("data", chunk => {
 				bytesStreamed += chunk.length;
+
+				// Log progress every 100MB for full downloads
+				if (bytesStreamed % (100 * 1024 * 1024) < chunk.length) {
+					const percent = (bytesStreamed / fileSize * 100).toFixed(2);
+					logger.info(`📊 Full download progress: ${bytesStreamed}/${fileSize} bytes (${percent}%) for token: ${token}`);
+				}
 			});
 
 			res.on("finish", async () => {
@@ -350,6 +434,25 @@ export default {
 						logger.error(`❌ Failed to update document or send email: ${err}`);
 					}
 				} else {
+					// Add partial range for what we did send
+					try {
+						const docNow = await collection.findOne({ token });
+						if (docNow) {
+							const existingRanges = docNow.partialRanges || [];
+							existingRanges.push({ start: 0, end: bytesStreamed - 1 });
+							const mergedRanges = mergeRanges(existingRanges);
+
+							await collection.updateOne(
+								{ token },
+								{ $set: { partialRanges: mergedRanges, locked: false } }
+							);
+
+							logDownloadProgress(mergedRanges, fileSize, logger, token, "PARTIAL FULL DOWNLOAD");
+						}
+					} catch (err) {
+						logger.error(`❌ Failed to update partial ranges: ${err}`);
+					}
+
 					logger.info(`⚠️ Full file stream ended, but only ${bytesStreamed}/${fileSize} bytes were sent (${(bytesStreamed / fileSize * 100).toFixed(2)}%).`);
 					try {
 						await collection.updateOne({ token }, { $set: { locked: false } });
