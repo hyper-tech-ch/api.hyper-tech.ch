@@ -147,7 +147,9 @@ export default {
 						}
 					} else {
 						// Track progress - calculate how much was downloaded
-						const percentCompleteValue = ((fileSize - start) / fileSize * 100);
+						// FIXED: When browser requests range 1000-end, it means it already has bytes 0-999
+						// So progress = start / fileSize (not the other way around)
+						const percentCompleteValue = (start / fileSize * 100);
 						const percentComplete = percentCompleteValue.toFixed(2);
 						logger.info(`🔄 Range request completed (${start}-${finalEnd}), progress: ~${percentComplete}%`);
 
