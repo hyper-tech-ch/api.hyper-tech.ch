@@ -32,26 +32,48 @@ function mergeRanges(ranges: Array<{ start: number; end: number }>) {
 	return merged;
 }
 
-// Check if the merged list covers from 0 to fileSize - 1 inclusive
-function hasFullCoverage(ranges: Array<{ start: number; end: number }>, fileSize: number) {
-	if (!ranges.length) return false;
-
-	const first = ranges[0];
-	const last = ranges[ranges.length - 1];
-	if (first.start !== 0 || last.end !== fileSize - 1) return false;
-
-	// Also confirm no gaps between merged ranges
-	for (let i = 0; i < ranges.length - 1; i++) {
-		if (ranges[i].end + 1 < ranges[i + 1].start) return false;
-	}
-	return true;
-}
-
 // Calculate total downloaded bytes from ranges
 function totalBytesDownloaded(ranges: Array<{ start: number; end: number }>) {
 	return ranges.reduce((total, range) => {
 		return total + (range.end - range.start + 1);
 	}, 0);
+}
+
+// Check if the ranges cover the entire file
+function isFullyCovered(ranges: Array<{ start: number; end: number }>, fileSize: number) {
+	// Sort and merge ranges
+	const merged = mergeRanges(ranges);
+
+	// Check if we have downloaded at least 99.9% of the file
+	// This handles cases where the browser might not request the last few bytes
+	const downloadedBytes = totalBytesDownloaded(merged);
+	const downloadPercentage = (downloadedBytes / fileSize) * 100;
+
+	if (downloadPercentage >= 99.9) {
+		return true;
+	}
+
+	// Check if there's a range starting at 0 and ending at (fileSize-1)
+	for (const range of merged) {
+		if (range.start === 0 && range.end >= fileSize - 1) {
+			return true;
+		}
+	}
+
+	// Check if merged ranges cover the full file (no gaps)
+	if (merged.length > 0) {
+		if (merged[0].start !== 0) return false;
+
+		let currentEnd = merged[0].end;
+		for (let i = 1; i < merged.length; i++) {
+			if (merged[i].start > currentEnd + 1) return false;
+			currentEnd = Math.max(currentEnd, merged[i].end);
+		}
+
+		return currentEnd >= fileSize - 1;
+	}
+
+	return false;
 }
 
 async function findMovieFile(fileName: string): Promise<string | null> {
@@ -87,8 +109,16 @@ export default {
 		const collection = await GetCollection("movie_links");
 
 		// Check if the document is available and not locked
-		let document = await collection.findOne({ token, locked: false });
-		if (!document) {
+		let document = await collection.findOne({ token });
+
+		// If there's already a downloadedAt timestamp, the download was completed
+		if (document?.downloadedAt) {
+			res.status(403).json({ error: "DOWNLOAD_ALREADY_COMPLETED" });
+			return;
+		}
+
+		// Check if document exists and is not locked
+		if (!document || document.locked) {
 			res.status(400).json({ error: "TOKEN_INVALID", message: "DOCUMENT_LOCKED" });
 			return;
 		}
@@ -135,107 +165,107 @@ export default {
 			const [startStr, endStr] = rangeHeader.replace(/bytes=/, "").split("-");
 			const start = parseInt(startStr, 10);
 			const end = endStr ? parseInt(endStr, 10) : fileSize - 1;
-			const chunkSize = end - start + 1;
+
+			// Prevent end from exceeding file size
+			const safeEnd = Math.min(end, fileSize - 1);
+			const chunkSize = safeEnd - start + 1;
 
 			res.writeHead(206, {
-				"Content-Range": `bytes ${start}-${end}/${fileSize}`,
+				"Content-Range": `bytes ${start}-${safeEnd}/${fileSize}`,
 				"Accept-Ranges": "bytes",
 				"Content-Length": chunkSize,
 				"Content-Type": "video/mp4",
 				"Content-Disposition": 'attachment; filename="Heuried.mp4"',
 			});
 
-			const fileStream = createReadStream(file, { start, end });
+			const fileStream = createReadStream(file, { start, end: safeEnd });
 
 			fileStream.on("data", chunk => {
 				bytesStreamed += chunk.length;
 			});
 
-			logger.info(`Streaming range: ${start}-${end} (${chunkSize} bytes) to IP: ${req.ip} with token: ${token}`);
+			logger.info(`Streaming range: ${start}-${safeEnd} (${chunkSize} bytes) to IP: ${req.ip} with token: ${token}`);
 
 			// When the response is finished flushing data
 			res.on("finish", async () => {
 				try {
+					// Get the latest document state
 					const docNow = await collection.findOne({ token });
 					if (!docNow) {
-						logger.error("❌ Document missing after range download, cannot update partialRanges");
+						logger.error("❌ Document missing after range download");
 						return;
 					}
 
 					// Record the served range in document
 					const existingRanges = docNow.partialRanges || [];
-					existingRanges.push({ start, end });
+					existingRanges.push({ start, end: safeEnd });
+
+					// Make sure we have no duplicate or overlapping ranges
 					const mergedRanges = mergeRanges(existingRanges);
 
 					// Calculate total bytes downloaded from all ranges
 					const totalBytes = totalBytesDownloaded(mergedRanges);
+					const progressPercentage = (totalBytes / fileSize * 100).toFixed(2);
 
-					// Log progress for debugging
-					logger.debug(`Range download progress: ${totalBytes}/${fileSize} bytes (${(totalBytes / fileSize * 100).toFixed(2)}%) for token: ${token}`);
+					logger.debug(`Range download progress: ${totalBytes}/${fileSize} bytes (${progressPercentage}%) for token: ${token}`);
 
-					// Check for full coverage OR if total bytes downloaded matches the file size
-					// This handles cases where browsers download chunks out of order
-					const isComplete =
-						hasFullCoverage(mergedRanges, fileSize) ||
-						totalBytes >= fileSize;
+					// First update the ranges regardless of completion
+					await collection.updateOne(
+						{ token },
+						{ $set: { partialRanges: mergedRanges } }
+					);
 
-					if (isComplete && !docNow.downloadedAt) {
-						// Mark as successful before updating the document
+					// Check if download is complete
+					if (isFullyCovered(mergedRanges, fileSize)) {
+						// Mark as successful
 						downloadSuccessful = true;
 						logger.info(`✅ Range-based download completed for token: ${token} from IP: ${req.ip}`);
-						logger.info(`Total bytes: ${totalBytes}, File size: ${fileSize}`);
+						logger.info(`Total bytes: ${totalBytes}/${fileSize} (${progressPercentage}%)`);
 
-						// Update document with merged ranges AND completion status
-						try {
-							await collection.updateOne({ token }, {
+						// Update document with completion status and keep it locked
+						await collection.updateOne(
+							{ token },
+							{
 								$set: {
-									partialRanges: mergedRanges,
 									downloadedAt: new Date(),
-									locked: true // Keep it locked after successful download
+									locked: true // Lock permanently after successful download
 								}
-							});
-
-							// Only send email if it hasn't been downloaded before
-							if (!docNow.downloadedAt) {
-								sendMail(docNow.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
-								logger.info(`📧 Email sent to ${docNow.email} for completed download`);
-							} else {
-								logger.info(`🔄 Download complete, but email already sent previously`);
 							}
-						} catch (err) {
-							logger.error("❌ Failed to update document or send email:", err);
+						);
+
+						// Send email notification
+						try {
+							sendMail(docNow.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
+							logger.info(`📧 Email sent to ${docNow.email} for completed download`);
+						} catch (emailErr) {
+							logger.error(`❌ Failed to send email: ${emailErr}`);
 						}
 					} else {
-						// Just update the ranges
-						await collection.updateOne({ token }, { $set: { partialRanges: mergedRanges } });
-
-						if (!isComplete) {
-							logger.info(`⚠️ Partial content finished. Coverage so far: ${totalBytes}/${fileSize} bytes (${Math.round(totalBytes / fileSize * 100)}%)`);
-							await collection.updateOne({ token }, { $set: { locked: false } });
-						}
+						// Unlock for future download attempts
+						logger.info(`⚠️ Partial content finished. Coverage so far: ${totalBytes}/${fileSize} bytes (${Math.round(totalBytes / fileSize * 100)}%)`);
+						await collection.updateOne({ token }, { $set: { locked: false } });
 					}
 				} catch (err) {
-					logger.error("❌ Error updating partial ranges:", err);
+					logger.error(`❌ Error updating ranges: ${err}`);
 					try {
 						await collection.updateOne({ token }, { $set: { locked: false } });
 					} catch (unlockErr) {
-						logger.error("❌ Failed to unlock document:", unlockErr);
+						logger.error(`❌ Failed to unlock document: ${unlockErr}`);
 					}
 				}
 			});
 
 			fileStream.on("error", async err => {
-				logger.error("❌ Error during partial file streaming:", err);
+				logger.error(`❌ Error during partial file streaming: ${err}`);
 				res.status(500).json({ error: "Failed to stream the file" });
 				try {
 					await collection.updateOne({ token }, { $set: { locked: false } });
 				} catch (unlockErr) {
-					logger.error("❌ Failed to unlock the document:", unlockErr);
+					logger.error(`❌ Failed to unlock the document: ${unlockErr}`);
 				}
 			});
 
 			fileStream.pipe(res);
-
 		} else {
 			// Full file download (no Range header)
 			res.setHeader("Content-Length", fileSize);
@@ -249,58 +279,50 @@ export default {
 			});
 
 			res.on("finish", async () => {
-				// If we streamed exactly fileSize bytes
-				if (bytesStreamed === fileSize) {
+				// If we streamed at least 99.9% of the file size
+				if (bytesStreamed >= (fileSize * 0.999)) {
 					logger.info(`✅ Full file download completed for token: ${token} from IP: ${req.ip}`);
 					downloadSuccessful = true;
 
 					try {
-						// Get current document state
-						const docNow = await collection.findOne({ token });
-						if (!docNow) {
-							logger.error("❌ Document missing after full download");
-							return;
-						}
-
-						// Update document with full coverage
+						// Update document with full coverage and lock it
 						await collection.updateOne(
 							{ token },
 							{
 								$set: {
 									partialRanges: [{ start: 0, end: fileSize - 1 }],
 									downloadedAt: new Date(),
-									locked: true, // lock to prevent further downloads
+									locked: true // Lock permanently
 								},
 							}
 						);
 
-						// Only send email if it hasn't been downloaded before
-						if (!docNow.downloadedAt) {
+						// Send email
+						const docNow = await collection.findOne({ token });
+						if (docNow) {
 							sendMail(docNow.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
 							logger.info(`📧 Email sent to ${docNow.email} for completed download`);
-						} else {
-							logger.info(`🔄 Download complete, but email already sent previously`);
 						}
 					} catch (err) {
-						logger.error("❌ Failed to update document or send email:", err);
+						logger.error(`❌ Failed to update document or send email: ${err}`);
 					}
 				} else {
 					logger.info(`⚠️ Full file stream ended, but only ${bytesStreamed}/${fileSize} bytes were sent.`);
 					try {
 						await collection.updateOne({ token }, { $set: { locked: false } });
 					} catch (unlockErr) {
-						logger.error("❌ Failed to unlock the document:", unlockErr);
+						logger.error(`❌ Failed to unlock the document: ${unlockErr}`);
 					}
 				}
 			});
 
 			fileStream.on("error", async err => {
-				logger.error("❌ Error during file streaming:", err);
+				logger.error(`❌ Error during file streaming: ${err}`);
 				res.status(500).json({ error: "Failed to stream the file" });
 				try {
 					await collection.updateOne({ token }, { $set: { locked: false } });
 				} catch (unlockErr) {
-					logger.error("❌ Failed to unlock the document:", unlockErr);
+					logger.error(`❌ Failed to unlock the document: ${unlockErr}`);
 				}
 			});
 
