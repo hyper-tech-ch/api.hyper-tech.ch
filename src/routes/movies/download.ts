@@ -147,11 +147,12 @@ export default {
 						}
 					} else {
 						// Track progress - calculate how much was downloaded
-						const percentComplete = ((fileSize - start) / fileSize * 100).toFixed(2);
+						const percentCompleteValue = ((fileSize - start) / fileSize * 100);
+						const percentComplete = percentCompleteValue.toFixed(2);
 						logger.info(`🔄 Range request completed (${start}-${finalEnd}), progress: ~${percentComplete}%`);
 
 						// Check if the client has downloaded most of the file (>95%)
-						if (percentComplete >= 95) {
+						if (percentCompleteValue >= 95) {
 							// If we're over 95%, consider it complete
 							downloadCompleted = true;
 							logger.info(`✅ Download considered complete (${percentComplete}%) for token: ${token}`);
