@@ -168,7 +168,8 @@ async function main() {
 	});
 
 	// Start the server
-	app.listen(PORT)
+	const server = app.listen(PORT)
+	server.timeout = 1000 * 60 * 10; // 10 minutes
 }
 
 main();
