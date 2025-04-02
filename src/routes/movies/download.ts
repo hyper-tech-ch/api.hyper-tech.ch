@@ -84,8 +84,9 @@ export default {
 			});
 
 			fileStream.on("end", async () => {
-				// If we've reached the last byte, consider it fully downloaded
-				if (end === fileSize - 1 && bytesStreamed === chunkSize) {
+				// Ensure the entire file was streamed by checking end === fileSize - 1
+				// and that we streamed exactly chunkSize bytes, and the response wasn't closed
+				if (res.writableEnded && end === fileSize - 1 && bytesStreamed === chunkSize) {
 					downloadSuccessful = true;
 					logger.info(`✅ Range-based download completed for token: ${token} from IP: ${req.ip}`);
 
@@ -95,6 +96,8 @@ export default {
 					} catch (err) {
 						logger.error("❌ Failed to update document or send email:", err, "token:", token);
 					}
+				} else {
+					logger.info("⚠️ Partial stream ended, but download was incomplete.");
 				}
 			});
 
@@ -121,6 +124,7 @@ export default {
 			});
 
 			fileStream.on("end", async () => {
+				// Make sure we streamed the entire file
 				if (res.writableEnded && bytesStreamed === fileSize) {
 					downloadSuccessful = true;
 					logger.info(`✅ Full file download completed for token: ${token} from IP: ${req.ip}`);
