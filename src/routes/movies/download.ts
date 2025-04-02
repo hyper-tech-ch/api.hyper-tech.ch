@@ -96,6 +96,19 @@ export default {
 			}
 		};
 
+		// Update highwater mark of downloaded bytes in database
+		const updateHighwaterMark = async (position: number) => {
+			try {
+				// Only update if the new position is higher than what's stored
+				await collection.updateOne(
+					{ token, $or: [{ highwaterMark: { $lt: position } }, { highwaterMark: { $exists: false } }] },
+					{ $set: { highwaterMark: position } }
+				);
+			} catch (err) {
+				logger.error(`❌ Failed to update highwater mark: ${err}`);
+			}
+		};
+
 		// Handle client disconnect by unlocking if download not completed
 		req.on("close", async () => {
 			if (!downloadCompleted) {
@@ -139,14 +152,23 @@ export default {
 				// Create stream
 				const stream = createReadStream(file, { start, end: finalEnd });
 
+				let bytesStreamed = 0;
+				stream.on('data', (chunk) => {
+					bytesStreamed += chunk.length;
+				});
+
 				// Stream end event
 				stream.on("end", () => {
 					logger.info(`📤 Stream ended for range ${start}-${finalEnd}`);
 
-					// If download progress is >98% and we've reached near the end of the file
-					const reachedEnd = finalEnd >= fileSize - 1024;
-					if (downloadedPercent >= 98 && reachedEnd) {
-						logger.info(`✅ Stream end: Download is complete at ${downloadedPercent}%`);
+					// Update the highwater mark
+					const position = start + bytesStreamed;
+					updateHighwaterMark(position);
+
+					// If this is the last chunk and we're near the end of the file
+					// Criteria: We reached at least fileSize - 1KB
+					if (position >= fileSize - 1024) {
+						logger.info(`✅ Stream end: Download is complete at ${downloadedPercent}%, reached end of file`);
 						markAsCompleted();
 					}
 				});
@@ -155,9 +177,9 @@ export default {
 				res.on("finish", () => {
 					logger.info(`📤 Response finished for range ${start}-${finalEnd}`);
 
-					// If at least 98% of file was already downloaded AND we reached the end
-					if (downloadedPercent >= 98 && finalEnd >= fileSize - 1024) {
-						logger.info(`✅ Response finish: Download is complete at ${downloadedPercent}%`);
+					// If we've served all the way to the end (or nearly the end) of the file
+					if (finalEnd >= fileSize - 1024) {
+						logger.info(`✅ Response finish: Download is complete, reached end of file`);
 						markAsCompleted();
 					} else {
 						// Otherwise unlock for future requests
@@ -190,16 +212,38 @@ export default {
 
 				const stream = createReadStream(file);
 
+				let bytesStreamed = 0;
+				stream.on('data', (chunk) => {
+					bytesStreamed += chunk.length;
+				});
+
 				// Stream end event
 				stream.on("end", () => {
-					logger.info(`📤 Stream ended for full download`);
-					markAsCompleted();
+					logger.info(`📤 Stream ended for full download, streamed ${bytesStreamed}/${fileSize} bytes`);
+
+					// Update highwater mark
+					updateHighwaterMark(bytesStreamed);
+
+					// If we've streamed almost the entire file
+					if (bytesStreamed >= fileSize - 1024) {
+						markAsCompleted();
+					}
 				});
 
 				// Response finish event
 				res.on("finish", () => {
 					logger.info(`📤 Response finished for full download`);
-					markAsCompleted();
+
+					// For full downloads, check if we've sent most of the file
+					if (bytesStreamed >= fileSize - 1024) {
+						markAsCompleted();
+					} else {
+						// Otherwise unlock
+						if (!downloadCompleted) {
+							collection.updateOne({ token }, { $set: { locked: false } })
+								.catch(err => logger.error(`❌ Failed to unlock document: ${err}`));
+						}
+					}
 				});
 
 				// Error handling
