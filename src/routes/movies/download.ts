@@ -62,8 +62,9 @@ export default {
 		// Lock the document
 		await collection.updateOne({ token }, { $set: { locked: true } });
 
-		// Find the movie file
-		const file = await findMovieFile("Heuried.mp4");
+		// Find the movie file - use document.fileName if available, fallback to hardcoded name
+		const movieFileName = document.fileName || "Heuried.mp4";
+		const file = await findMovieFile(movieFileName);
 		if (!file) {
 			await collection.updateOne({ token }, { $set: { locked: false } });
 			return res.status(500).json({ error: "MOVIE_FILE_NOT_FOUND" });
@@ -78,14 +79,14 @@ export default {
 		// Helper function to mark as completed
 		const markAsCompleted = async () => {
 			if (downloadCompleted) return; // Prevent double execution
-
 			downloadCompleted = true;
+
 			logger.info(`✅ Download completed for token: ${token}`);
 
 			try {
 				await collection.updateOne(
 					{ token },
-					{ $set: { downloadedAt: new Date(), locked: true } }
+					{ $set: { downloadedAt: new Date(), locked: false } } // Set locked to false as we're done
 				);
 
 				// Send email notification
@@ -96,39 +97,35 @@ export default {
 			}
 		};
 
-		// Update highwater mark of downloaded bytes in database
-		const updateHighwaterMark = async (position: number) => {
+		// Helper function to unlock the document
+		const unlockDocument = async () => {
+			if (downloadCompleted) return;
+
 			try {
-				// Only update if the new position is higher than what's stored
-				await collection.updateOne(
-					{ token, $or: [{ highwaterMark: { $lt: position } }, { highwaterMark: { $exists: false } }] },
-					{ $set: { highwaterMark: position } }
-				);
+				await collection.updateOne({ token }, { $set: { locked: false } });
+				logger.info(`🔓 Document unlocked for token: ${token}`);
 			} catch (err) {
-				logger.error(`❌ Failed to update highwater mark: ${err}`);
+				logger.error(`❌ Failed to unlock document: ${err}`);
 			}
 		};
 
-		// Handle client disconnect by unlocking if download not completed
+		// Handle client disconnect
 		req.on("close", async () => {
-			if (!downloadCompleted) {
+			if (!res.writableEnded) {
 				logger.info(`⏸️ Download paused/interrupted for token: ${token}`);
-				try {
-					await collection.updateOne({ token }, { $set: { locked: false } });
-				} catch (err) {
-					logger.error(`❌ Failed to unlock document: ${err}`);
-				}
+				await unlockDocument();
 			}
 		});
 
 		// Set common headers
 		res.setHeader("Accept-Ranges", "bytes");
 		res.setHeader("Content-Type", "video/mp4");
-		res.setHeader("Content-Disposition", 'attachment; filename="Heuried.mp4"');
+		res.setHeader("Content-Disposition", `attachment; filename="${movieFileName}"`);
 
 		try {
 			// Handle range request
 			const range = req.headers.range;
+			let stream;
 
 			if (range) {
 				// Parse range
@@ -137,12 +134,9 @@ export default {
 				const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 				const finalEnd = Math.min(end, fileSize - 1);
 				const chunkSize = finalEnd - start + 1;
+				const isEndRange = finalEnd >= fileSize - 1024; // Last KB of file
 
-				// Calculate ACTUAL progress percentage (how much is already downloaded)
-				const downloadedBytes = start;
-				const downloadedPercent = Math.round((downloadedBytes / fileSize) * 100);
-
-				logger.info(`📥 Serving range: ${start}-${finalEnd}, download progress: ${downloadedPercent}% (${downloadedBytes}/${fileSize} bytes)`);
+				logger.info(`📥 Serving range: ${start}-${finalEnd}/${fileSize} (${Math.round((start / fileSize) * 100)}% already downloaded)`);
 
 				// Send partial content
 				res.status(206);
@@ -150,126 +144,43 @@ export default {
 				res.setHeader("Content-Range", `bytes ${start}-${finalEnd}/${fileSize}`);
 
 				// Create stream
-				const stream = createReadStream(file, { start, end: finalEnd });
+				stream = createReadStream(file, { start, end: finalEnd });
 
-				let bytesStreamed = 0;
-				stream.on('data', (chunk) => {
-					bytesStreamed += chunk.length;
-				});
-
-				// Stream end event
-				stream.on("end", () => {
-					logger.info(`📤 Stream ended for range ${start}-${finalEnd}`);
-
-					// Update the highwater mark
-					const position = start + bytesStreamed;
-					updateHighwaterMark(position);
-
-					// If this is the last chunk and we're near the end of the file
-					// Criteria: We reached at least fileSize - 1KB
-					if (position >= fileSize - 1024) {
-						logger.info(`✅ Stream end: Download is complete at ${downloadedPercent}%, reached end of file`);
-						markAsCompleted();
-					}
-				});
-
-				// Response finished event
-				res.on("finish", () => {
-					logger.info(`📤 Response finished for range ${start}-${finalEnd}`);
-
-					// If we've served all the way to the end (or nearly the end) of the file
-					if (finalEnd >= fileSize - 1024) {
-						logger.info(`✅ Response finish: Download is complete, reached end of file`);
-						markAsCompleted();
-					} else {
-						// Otherwise unlock for future requests
-						if (!downloadCompleted) {
-							collection.updateOne({ token }, { $set: { locked: false } })
-								.catch(err => logger.error(`❌ Failed to unlock document: ${err}`));
-						}
-					}
-				});
-
-				// Error handling
-				stream.on("error", async (err) => {
-					logger.error(`❌ Error streaming file: ${err}`);
-					if (!downloadCompleted) {
-						try {
-							await collection.updateOne({ token }, { $set: { locked: false } });
-						} catch (unlockErr) {
-							logger.error(`❌ Failed to unlock document: ${unlockErr}`);
-						}
-					}
-				});
-
-				// Send the file
-				stream.pipe(res);
-
+				// If this is the end of the file, prepare to mark complete when done
+				if (isEndRange) {
+					res.on("finish", markAsCompleted);
+				} else {
+					res.on("finish", unlockDocument);
+				}
 			} else {
 				// Full file download
-				logger.info(`📥 Serving full file (0% progress) for token: ${token}`);
+				logger.info(`📥 Serving full file for token: ${token}`);
 				res.setHeader("Content-Length", fileSize);
 
-				const stream = createReadStream(file);
+				// Create stream
+				stream = createReadStream(file);
 
-				let bytesStreamed = 0;
-				stream.on('data', (chunk) => {
-					bytesStreamed += chunk.length;
-				});
-
-				// Stream end event
-				stream.on("end", () => {
-					logger.info(`📤 Stream ended for full download, streamed ${bytesStreamed}/${fileSize} bytes`);
-
-					// Update highwater mark
-					updateHighwaterMark(bytesStreamed);
-
-					// If we've streamed almost the entire file
-					if (bytesStreamed >= fileSize - 1024) {
-						markAsCompleted();
-					}
-				});
-
-				// Response finish event
-				res.on("finish", () => {
-					logger.info(`📤 Response finished for full download`);
-
-					// For full downloads, check if we've sent most of the file
-					if (bytesStreamed >= fileSize - 1024) {
-						markAsCompleted();
-					} else {
-						// Otherwise unlock
-						if (!downloadCompleted) {
-							collection.updateOne({ token }, { $set: { locked: false } })
-								.catch(err => logger.error(`❌ Failed to unlock document: ${err}`));
-						}
-					}
-				});
-
-				// Error handling
-				stream.on("error", async (err) => {
-					logger.error(`❌ Error streaming file: ${err}`);
-					if (!downloadCompleted) {
-						try {
-							await collection.updateOne({ token }, { $set: { locked: false } });
-						} catch (unlockErr) {
-							logger.error(`❌ Failed to unlock document: ${unlockErr}`);
-						}
-					}
-				});
-
-				// Send the file
-				stream.pipe(res);
+				// Mark as completed when the full file is sent
+				res.on("finish", markAsCompleted);
 			}
+
+			// Error handling for stream
+			stream.on("error", async (err) => {
+				logger.error(`❌ Error streaming file: ${err}`);
+				await unlockDocument();
+				if (!res.headersSent) {
+					res.status(500).send("Error streaming file");
+				}
+			});
+
+			// Send the file
+			stream.pipe(res);
 
 		} catch (err) {
 			logger.error(`❌ Unexpected error: ${err}`);
-			if (!downloadCompleted) {
-				try {
-					await collection.updateOne({ token }, { $set: { locked: false } });
-				} catch (unlockErr) {
-					logger.error(`❌ Failed to unlock document: ${unlockErr}`);
-				}
+			await unlockDocument();
+			if (!res.headersSent) {
+				res.status(500).json({ error: "INTERNAL_SERVER_ERROR" });
 			}
 		}
 	},
