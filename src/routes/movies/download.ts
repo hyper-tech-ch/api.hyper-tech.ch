@@ -106,8 +106,9 @@ export default {
 				// Limit end to file size
 				const finalEnd = Math.min(end, fileSize - 1);
 				const chunkSize = finalEnd - start + 1;
+				const percentOfFile = (chunkSize / fileSize * 100).toFixed(2);
 
-				logger.info(`📥 Serving range: ${start}-${finalEnd} (${chunkSize} bytes, ${(chunkSize / fileSize * 100).toFixed(2)}%) for token: ${token}`);
+				logger.info(`📥 Serving range: ${start}-${finalEnd} (${chunkSize} bytes, ${percentOfFile}%) for token: ${token}`);
 
 				// Send partial content response
 				res.status(206);
@@ -119,7 +120,11 @@ export default {
 
 				// Handle successful completion of the range
 				res.on("finish", async () => {
-					if (finalEnd >= fileSize - 100) { // Allow small margin at the end
+					// Only mark as complete if this is the FULL file (start at 0)
+					// or a very small start position (accepting first few bytes might be missing)
+					const isCompleteDownload = start <= 1024 && finalEnd >= fileSize - 1024; // Allow 1KB tolerance
+
+					if (isCompleteDownload) {
 						downloadCompleted = true;
 						logger.info(`✅ Download completed for token: ${token}`);
 
@@ -141,9 +146,37 @@ export default {
 							logger.error(`❌ Failed to update document or send email: ${err}`);
 						}
 					} else {
-						// Partial download finished, unlock
-						logger.info(`🔄 Range request completed (${start}-${finalEnd}), progress: ${((finalEnd + 1) / fileSize * 100).toFixed(2)}%`);
-						await collection.updateOne({ token }, { $set: { locked: false } });
+						// Track progress - calculate how much was downloaded
+						const percentComplete = ((fileSize - start) / fileSize * 100).toFixed(2);
+						logger.info(`🔄 Range request completed (${start}-${finalEnd}), progress: ~${percentComplete}%`);
+
+						// Check if the client has downloaded most of the file (>95%)
+						if (percentComplete >= 95) {
+							// If we're over 95%, consider it complete
+							downloadCompleted = true;
+							logger.info(`✅ Download considered complete (${percentComplete}%) for token: ${token}`);
+
+							try {
+								await collection.updateOne(
+									{ token },
+									{
+										$set: {
+											downloadedAt: new Date(),
+											locked: true // Keep locked after completion
+										}
+									}
+								);
+
+								// Send email notification
+								sendMail(document.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
+								logger.info(`📧 Email sent to ${document.email} for completed download`);
+							} catch (err) {
+								logger.error(`❌ Failed to update document or send email: ${err}`);
+							}
+						} else {
+							// Otherwise, unlock for future download attempts
+							await collection.updateOne({ token }, { $set: { locked: false } });
+						}
 					}
 				});
 
