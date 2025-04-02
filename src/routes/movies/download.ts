@@ -41,7 +41,7 @@ export default {
 		let document = await collection.findOne({ token: token, locked: false });
 
 		if (!document) {
-			res.status(400).json({ error: "TOKEN_INVALID" });
+			res.status(400).json({ error: "TOKEN_INVALID", message: "DOCUMENT_LOCKED" });
 			return;
 		}
 
@@ -64,7 +64,7 @@ export default {
 		res.setHeader("Content-Disposition", 'attachment; filename="Heuried.mp4"');
 
 		// Lock the document to prevent further downloads
-		collection.updateOne({ token: token }, { $set: { locked: true } });
+		await collection.updateOne({ token: token }, { $set: { locked: true } });
 
 		// Pipe the file stream to the response
 		fileStream.pipe(res);
