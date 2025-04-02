@@ -75,8 +75,30 @@ export default {
 
 		logger.info(`🎬 Download started for token: ${token}, IP: ${req.ip}, file: ${file}, size: ${fileSize} bytes`);
 
+		// Mark download as completed and update DB
+		const markAsCompleted = async () => {
+			if (downloadCompleted) return; // Prevent duplicate processing
+			downloadCompleted = true;
+
+			logger.info(`✅ Download completed for token: ${token}`);
+
+			try {
+				await collection.updateOne(
+					{ token },
+					{ $set: { downloadedAt: new Date(), locked: true } }
+				);
+
+				// Send email
+				sendMail(document.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
+				logger.info(`📧 Email sent to ${document.email} for completed download`);
+			} catch (err) {
+				logger.error(`❌ Failed to update document or send email: ${err}`);
+			}
+		};
+
 		// Handle client disconnect by unlocking if download not completed
 		req.on("close", async () => {
+			// Only if we're not already marked as completed
 			if (!downloadCompleted) {
 				logger.info(`⏸️ Download paused/interrupted for token: ${token}`);
 				try {
@@ -118,53 +140,63 @@ export default {
 				// Create stream
 				const stream = createReadStream(file, { start, end: finalEnd });
 
-				// Monitor for data flowing through the stream (important for completion detection)
+				// Monitor for data flowing through the stream
 				let bytesSent = 0;
 				stream.on('data', (chunk) => {
 					bytesSent += chunk.length;
+
+					// Log progress occasionally for large chunks
+					if (bytesSent > 0 && bytesSent % (100 * 1024 * 1024) < chunk.length) {
+						logger.debug(`📊 Streaming progress: sent ${Math.round(bytesSent / 1024 / 1024)}MB so far of this chunk`);
+					}
 				});
 
-				// Handle completion of the range
+				// Handle stream end
+				stream.on('end', () => {
+					logger.debug(`🔄 Stream ended for range ${start}-${finalEnd}, sent ${bytesSent}/${chunkSize} bytes`);
+
+					// If download progress is >98% and we've reached near the end of the file
+					const reachedEnd = finalEnd >= fileSize - 1024;
+					if (downloadedPercent >= 98 && reachedEnd) {
+						logger.info(`✅ Stream end event: Download is complete at ${downloadedPercent}%`);
+						markAsCompleted();
+					}
+				});
+
+				// Response finished event
 				res.on("finish", async () => {
-					// Check if we reached the end of the file AND we've sent enough data
-					const reachedEndOfFile = (finalEnd >= fileSize - 1024); // Within 1KB of the end
-					const sentFullChunk = (bytesSent >= chunkSize * 0.98); // Sent at least 98% of the chunk
+					logger.debug(`🔄 Response finished for range ${start}-${finalEnd}`);
 
-					// If at least 95% of file was already downloaded AND we reached the end, mark as completed
-					if (downloadedPercent >= 95 && reachedEndOfFile && sentFullChunk) {
-						downloadCompleted = true;
-						logger.info(`✅ Download completed (${downloadedPercent}%, reached end of file) for token: ${token}`);
-
-						try {
-							await collection.updateOne(
-								{ token },
-								{ $set: { downloadedAt: new Date(), locked: true } }
-							);
-
-							// Send email
-							sendMail(document.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
-							logger.info(`📧 Email sent to ${document.email} for completed download`);
-						} catch (err) {
-							logger.error(`❌ Failed to update document or send email: ${err}`);
-						}
+					// If at least 98% of file was already downloaded AND we reached the end
+					if (downloadedPercent >= 98 && finalEnd >= fileSize - 1024) {
+						logger.info(`✅ Response finish event: Download is complete at ${downloadedPercent}%`);
+						await markAsCompleted();
 					} else {
-						// Log completion status for debugging
-						if (reachedEndOfFile) {
-							logger.info(`🔄 Reached end of file, but progress only ${downloadedPercent}% (need 95%)`);
-						}
-
 						// Otherwise unlock for future requests
 						await collection.updateOne({ token }, { $set: { locked: false } });
+					}
+				});
+
+				// Also listen for the close event as a backup
+				res.on("close", async () => {
+					logger.debug(`🔄 Response closed for range ${start}-${finalEnd}`);
+
+					// If we're at the end of the file with 98%+ downloaded
+					if (!downloadCompleted && downloadedPercent >= 98 && finalEnd >= fileSize - 1024) {
+						logger.info(`✅ Response close event: Download is complete at ${downloadedPercent}%`);
+						await markAsCompleted();
 					}
 				});
 
 				// Error handling
 				stream.on("error", async (err) => {
 					logger.error(`❌ Error streaming file: ${err}`);
-					try {
-						await collection.updateOne({ token }, { $set: { locked: false } });
-					} catch (unlockErr) {
-						logger.error(`❌ Failed to unlock document: ${unlockErr}`);
+					if (!downloadCompleted) {
+						try {
+							await collection.updateOne({ token }, { $set: { locked: false } });
+						} catch (unlockErr) {
+							logger.error(`❌ Failed to unlock document: ${unlockErr}`);
+						}
 					}
 				});
 
@@ -182,27 +214,32 @@ export default {
 				let bytesSent = 0;
 				stream.on('data', (chunk) => {
 					bytesSent += chunk.length;
+
+					// Log progress occasionally
+					if (bytesSent > 0 && bytesSent % (100 * 1024 * 1024) < chunk.length) {
+						logger.debug(`📊 Full download progress: sent ${Math.round(bytesSent / 1024 / 1024)}MB so far`);
+					}
 				});
 
-				// Handle completion
+				// Stream end event
+				stream.on('end', () => {
+					logger.debug(`🔄 Stream ended for full download, sent ${bytesSent}/${fileSize} bytes`);
+
+					// If we've sent most of the file
+					if (bytesSent >= fileSize * 0.98) {
+						logger.info(`✅ Stream end event: Full download complete`);
+						markAsCompleted();
+					}
+				});
+
+				// Response finish event
 				res.on("finish", async () => {
-					// Only mark as complete if we sent at least 99% of the file
-					if (bytesSent >= fileSize * 0.99) {
-						downloadCompleted = true;
-						logger.info(`✅ Full download completed for token: ${token}, sent ${bytesSent}/${fileSize} bytes`);
+					logger.debug(`🔄 Response finished for full download`);
 
-						try {
-							await collection.updateOne(
-								{ token },
-								{ $set: { downloadedAt: new Date(), locked: true } }
-							);
-
-							// Send email
-							sendMail(document.email, "Ihre Bestellung: Film heruntergeladen", "movie_downloaded.html");
-							logger.info(`📧 Email sent to ${document.email} for completed download`);
-						} catch (err) {
-							logger.error(`❌ Failed to update document or send email: ${err}`);
-						}
+					// Only mark as complete if we sent at least 98% of the file
+					if (bytesSent >= fileSize * 0.98) {
+						logger.info(`✅ Response finish event: Full download complete, sent ${bytesSent}/${fileSize} bytes`);
+						await markAsCompleted();
 					} else {
 						// If we didn't send the entire file, unlock for future attempts
 						logger.info(`⚠️ Full download attempt incomplete, only sent ${bytesSent}/${fileSize} bytes (${Math.round(bytesSent / fileSize * 100)}%)`);
@@ -210,13 +247,26 @@ export default {
 					}
 				});
 
+				// Also listen for the close event
+				res.on("close", async () => {
+					logger.debug(`🔄 Response closed for full download`);
+
+					// If we've sent enough of the file
+					if (!downloadCompleted && bytesSent >= fileSize * 0.98) {
+						logger.info(`✅ Response close event: Full download complete`);
+						await markAsCompleted();
+					}
+				});
+
 				// Error handling
 				stream.on("error", async (err) => {
 					logger.error(`❌ Error streaming file: ${err}`);
-					try {
-						await collection.updateOne({ token }, { $set: { locked: false } });
-					} catch (unlockErr) {
-						logger.error(`❌ Failed to unlock document: ${unlockErr}`);
+					if (!downloadCompleted) {
+						try {
+							await collection.updateOne({ token }, { $set: { locked: false } });
+						} catch (unlockErr) {
+							logger.error(`❌ Failed to unlock document: ${unlockErr}`);
+						}
 					}
 				});
 
@@ -226,10 +276,12 @@ export default {
 
 		} catch (err) {
 			logger.error(`❌ Unexpected error: ${err}`);
-			try {
-				await collection.updateOne({ token }, { $set: { locked: false } });
-			} catch (unlockErr) {
-				logger.error(`❌ Failed to unlock document: ${unlockErr}`);
+			if (!downloadCompleted) {
+				try {
+					await collection.updateOne({ token }, { $set: { locked: false } });
+				} catch (unlockErr) {
+					logger.error(`❌ Failed to unlock document: ${unlockErr}`);
+				}
 			}
 		}
 	},
