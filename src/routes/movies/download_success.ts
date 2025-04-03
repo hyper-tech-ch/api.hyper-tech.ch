@@ -55,6 +55,7 @@ export default {
 				);
 
 				if(sendMailSuccess) {
+					logger.info(`Client just reported a progress of 100% for token: ${token} (${progress}%)`);
 					logger.info(`✅ Download completed and email sent to ${document.email}`);
 				} else {
 					logger.error(`❌ Failed to send email to ${document.email}`);
