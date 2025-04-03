@@ -7,6 +7,7 @@ import cors from "cors";
 import { sendMail } from "../../helpers/sendMail";
 import { getLogger } from "../../helpers/logger";
 import send from 'send';
+import { fstat, fstatSync, statSync } from "fs";
 
 // Simple function to find the movie file
 async function findMovieFile(fileName: string): Promise<string | null> {
@@ -69,6 +70,10 @@ export default {
 			logger.error(`IP ${req.ip} tried to use ${token}, but it doesn't exist`);
 			return res.status(500).json({ error: "MOVIE_FILE_NOT_FOUND" });
 		}
+		let fsstats = statSync(file);
+		if (fsstats.size === 0) {
+			return res.status(500).json({ error: "MOVIE_FILE_EMPTY" });
+		}
 
 		// Lock the document
 		//await collection.updateOne({ token }, { $set: { locked: true } });
@@ -79,18 +84,22 @@ export default {
 			cacheControl: false,
 			immutable: true,
 			maxAge: 0,
+			end: fsstats.size - 1,
 		});
 
 		// Track download progress and completion
-		stream.on('end', () => {
-			logger.info(`✅ IP ${req.ip} finished downloading ${movieFileName}, token: ${token}`);
-		});
 		stream.on('error', (err) => {
 			logger.info(`❌ IP ${req.ip} failed to download ${movieFileName}, token: ${token}, error: ${err.message}`);
 		});
 
 		res.on('close', () => {
-			logger.info(`😒 IP ${req.ip} closed/canceled the download of ${movieFileName}, token: ${token}`);
+			// This indicates the connection was closed, potentially prematurely
+			if (!res.writableFinished) {
+				logger.info(`😒 IP ${req.ip} closed/canceled the download of ${movieFileName}, token: ${token}`);
+			}
+		});
+		res.on('finish', () => {
+			logger.info(`✅ IP ${req.ip} finished sending ${movieFileName}, token: ${token}`);
 		});
 
 		res.setHeader('Content-Disposition', `attachment; filename="video.mp4"`);
