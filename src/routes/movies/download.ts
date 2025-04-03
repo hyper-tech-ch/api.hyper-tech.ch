@@ -9,6 +9,7 @@ import { statSync } from "fs";
 import rangeParser from "range-parser";
 import fs from "fs";
 import { Transform } from "stream";
+import { throttle } from "lodash";
 
 // Simple function to find the movie file
 async function findMovieFile(fileName: string): Promise<string | null> {
@@ -63,6 +64,9 @@ export default {
 			return res.status(409).json({ error: "DOWNLOAD_IN_PROGRESS" });
 		}
 
+		// Lock the token for download
+		await collection.updateOne({ token }, { $set: { locked: true } });
+
 		const movieFileName = document.fileName || "Heuried.mp4";
 		const file = await findMovieFile(movieFileName);
 		if (!file) {
@@ -75,6 +79,7 @@ export default {
 		const fileSize = stats.size;
 
 		if (fileSize === 0) {
+			await collection.updateOne({ token }, { $set: { locked: false } });
 			return res.status(500).json({ error: "MOVIE_FILE_EMPTY" });
 		}
 
@@ -96,6 +101,7 @@ export default {
 
 			if (ranges === -1 || ranges === -2 || ranges.type !== 'bytes') {
 				// Invalid range
+				await collection.updateOne({ token }, { $set: { locked: false } });
 				return res.status(416).send('Range Not Satisfiable');
 			}
 
@@ -115,42 +121,102 @@ export default {
 		const contentLength = end - start + 1;
 		res.setHeader('Content-Length', contentLength);
 
-		// Create a progress tracker
+		// Throttled logger function to prevent excessive logging
+		const throttledLogger = throttle((bytesCount: number) => {
+			const percentComplete = Math.round((bytesCount / contentLength) * 100);
+			logger.info(`📊 IP ${req.ip} progress: ${bytesCount}/${contentLength} bytes (${percentComplete}%) of ${movieFileName}, token: ${token}`);
+		}, 2000);
+
+		// Create a progress tracker with backpressure awareness
 		let bytesSent = 0;
 		const progressTracker = new Transform({
+			highWaterMark: 256 * 1024, // 256KB buffer
 			transform(chunk, encoding, callback) {
 				bytesSent += chunk.length;
 
-				// Log progress every 100MB
-				if (Math.floor((bytesSent - chunk.length) / (100 * 1024 * 1024)) <
+				// Check if high water mark is reached (indicates backpressure)
+				const isBackpressure = this.writableLength >= this.writableHighWaterMark / 2;
+
+				// Only log progress when not experiencing backpressure or on specific intervals
+				if (!isBackpressure &&
+					Math.floor((bytesSent - chunk.length) / (100 * 1024 * 1024)) <
 					Math.floor(bytesSent / (100 * 1024 * 1024))) {
-					const percentComplete = Math.round((bytesSent / contentLength) * 100);
-					logger.info(`📊 IP ${req.ip} progress: ${bytesSent}/${contentLength} bytes (${percentComplete}%) of ${movieFileName}, token: ${token}`);
+					throttledLogger(bytesSent);
 				}
 
-				callback(null, chunk);
+				// If experiencing backpressure, slow down a bit
+				if (isBackpressure) {
+					setTimeout(() => callback(null, chunk), 50);
+				} else {
+					callback(null, chunk);
+				}
 			}
 		});
 
 		// Handle connection events
-		res.on('close', () => {
+		res.on('close', async () => {
+			// Clear the throughput monitoring interval
+			if (throughputInterval) {
+				clearInterval(throughputInterval);
+			}
+
 			if (!res.writableFinished) {
 				const percentComplete = Math.round((bytesSent / contentLength) * 100);
 				logger.info(`😒 IP ${req.ip} closed/canceled the download at ${percentComplete}% (${bytesSent}/${contentLength} bytes) of ${movieFileName}, token: ${token}`);
+
+				// Unlock the token if download was not completed
+				await collection.updateOne({ token }, { $set: { locked: false } });
 			}
 		});
 
-		res.on('finish', () => {
-			const percentComplete = Math.round((bytesSent / contentLength) * 100);
-			logger.info(`✅ IP ${req.ip} finished sending ${bytesSent}/${contentLength} bytes of ${movieFileName}, progress: ${percentComplete}%, token: ${token}`);
+		// Use a more conservative approach for finish event
+		res.on('finish', async () => {
+			// Clear the throughput monitoring interval
+			if (throughputInterval) {
+				clearInterval(throughputInterval);
+			}
+
+			// Wait a short period to ensure client has actually received the data
+			setTimeout(async () => {
+				const percentComplete = Math.round((bytesSent / contentLength) * 100);
+				logger.info(`✅ IP ${req.ip} finished sending ${bytesSent}/${contentLength} bytes of ${movieFileName}, progress: ${percentComplete}%, token: ${token}`);
+
+				// If the entire file was requested and sent, mark as downloaded
+				if (start === 0 && end === fileSize - 1 && percentComplete >= 99) {
+					await collection.updateOne({ token }, {
+						$set: {
+							downloadedAt: new Date(),
+							locked: false
+						}
+					});
+					logger.info(`🔓 Token ${token} marked as downloaded and unlocked`);
+				} else {
+					// Just unlock the token for partial downloads
+					await collection.updateOne({ token }, { $set: { locked: false } });
+					logger.info(`🔓 Token ${token} unlocked after partial download`);
+				}
+			}, 2000);
 		});
 
-		// Create read stream with specified range
-		const readStream = fs.createReadStream(file, { start, end });
+		// Create read stream with specified range and a smaller high water mark
+		const readStream = fs.createReadStream(file, {
+			start,
+			end,
+			highWaterMark: 64 * 1024 // 64KB chunks
+		});
 
-		// Handle errors
-		readStream.on('error', (err) => {
+		// Error handling
+		readStream.on('error', async (err) => {
 			logger.info(`❌ IP ${req.ip} failed to download ${movieFileName}, token: ${token}, error: ${err.message}`);
+
+			// Clear the throughput monitoring interval
+			if (throughputInterval) {
+				clearInterval(throughputInterval);
+			}
+
+			// Unlock the token on error
+			await collection.updateOne({ token }, { $set: { locked: false } });
+
 			if (!res.headersSent) {
 				res.status(500).send('Error reading file');
 			} else {
@@ -158,7 +224,26 @@ export default {
 			}
 		});
 
+		// Setup a periodic check to monitor actual throughput
+		let lastBytesSent = 0;
+		const throughputInterval = setInterval(() => {
+			const bytesDelta = bytesSent - lastBytesSent;
+			lastBytesSent = bytesSent;
+
+			if (bytesDelta > 0) {
+				const mbPerSecond = (bytesDelta / 1024 / 1024).toFixed(2);
+				logger.info(`🔄 IP ${req.ip} throughput: ${mbPerSecond} MB/s, download: ${movieFileName}, token: ${token}`);
+			}
+
+			// If the response is finished or closed, clear the interval
+			if (res.writableFinished || !res.writable) {
+				clearInterval(throughputInterval);
+			}
+		}, 5000); // Check every 5 seconds
+
 		// Pipe through progress tracker to response
-		readStream.pipe(progressTracker).pipe(res);
+		readStream
+			.pipe(progressTracker)
+			.pipe(res);
 	},
 } satisfies RouteHandler;
