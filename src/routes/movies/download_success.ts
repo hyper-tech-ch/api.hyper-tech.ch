@@ -4,6 +4,7 @@ import { GetCollection } from "../../helpers/database";
 import cors from "cors";
 import { getLogger } from "../../helpers/logger";
 import { clamp } from "lodash";
+import { sendMail } from "../../helpers/sendMail";
 
 export default {
 	Method: "post", // Keep as POST since your client is using POST
@@ -40,6 +41,25 @@ export default {
 					progress: 100,
 				}
 			});
+
+			let document = await collection.findOne({ token });
+			if (!document) {
+				logger.error(`Document with token ${token} not found after download completion.`);
+				return res.status(404).json({ error: "DOCUMENT_NOT_FOUND" });
+			} else {
+				let sendMailSuccess = await sendMail(
+					document.email,
+					"Ihre Bestellung: Film heruntergeladen",
+					"movie_downloaded.html",
+				
+				);
+
+				if(sendMailSuccess) {
+					logger.info(`✅ Download completed and email sent to ${document.email}`);
+				} else {
+					logger.error(`❌ Failed to send email to ${document.email}`);
+				}
+			}
 		} else if (progress === "-1") {
 			// Handle aborted, failed or incomplete downloads
 			await collection.updateOne({ token }, {
