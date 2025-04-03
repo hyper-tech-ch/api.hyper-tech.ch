@@ -40,6 +40,16 @@ export default {
 					progress: 100,
 				}
 			});
+		} else if (progress === "-1") {
+			// Handle aborted, failed or incomplete downloads
+			await collection.updateOne({ token }, {
+				$set: {
+					locked: false,
+					progress: -1,
+					errorAt: new Date()
+				}
+			});
+			logger.warn(`⚠️ Client reported download failure/cancellation for token: ${token}`);
 		} else {
 			await collection.updateOne({ token }, {
 				$set: {
