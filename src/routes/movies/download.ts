@@ -123,7 +123,7 @@ export default {
 
 				// Log progress every 100MB
 				if (Math.floor((bytesSent - chunk.length) / (100 * 1024 * 1024)) <
-					Math.floor(bytesSent / (250 * 1024 * 1024))) {
+					Math.floor(bytesSent / (100 * 1024 * 1024))) {
 					const percentComplete = Math.round((bytesSent / contentLength) * 100);
 					logger.info(`📊 IP ${req.ip} progress: ${bytesSent}/${contentLength} bytes (${percentComplete}%) of ${movieFileName}, token: ${token}`);
 				}
