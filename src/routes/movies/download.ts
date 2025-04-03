@@ -92,6 +92,9 @@ export default {
 			logger.info(`❌ IP ${req.ip} failed to download ${movieFileName}, token: ${token}, error: ${err.message}`);
 		});
 
+		stream.on('progress', (progress) => {
+			logger.info(`📦 IP ${req.ip} is downloading ${movieFileName}, token: ${token}, progress: ${progress}`);
+		});
 		res.on('close', () => {
 			// This indicates the connection was closed, potentially prematurely
 			if (!res.writableFinished) {
