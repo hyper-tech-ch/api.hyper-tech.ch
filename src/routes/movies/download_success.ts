@@ -12,7 +12,7 @@ import { clamp } from "lodash";
 
 export default {
 	Method: "post",
-	Path: "/movies/download_success",
+	Path: "/movies/progress",
 	Priority: 0,
 
 	AuthorizationGroup: null,
