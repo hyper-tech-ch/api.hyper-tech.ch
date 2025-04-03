@@ -196,6 +196,7 @@ async function main() {
 	const server = app.listen(PORT, () => {
 		logger.info(`Server now running on port ${PORT}!`);
 	})
+
 	server.timeout = 1000 * 60 * 10; // 10 minutes
 
 	server.on('error', (err: any) => {

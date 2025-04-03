@@ -45,7 +45,9 @@ export const initLogger = async () => {
 	logger.add(new winston.transports.Console({
 		format: winston.format.combine(
 			winston.format.colorize(),
-			winston.format.simple(),
+			winston.format.printf(({ timestamp, level, message }) => {
+				return `${level}	| ${message}`;
+			})
 		),
 		level: 'silly',
 	}));
