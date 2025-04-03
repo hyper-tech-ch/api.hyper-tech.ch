@@ -102,32 +102,29 @@ export default {
 			if (downloadCompleted) return;
 
 			try {
-				// Check if this was potentially the last chunk of the file
-				const currentPosition = document.highestBytePosition || 0;
-				const newPosition = Math.max(currentPosition, req.headers.range ?
-					parseInt(req.headers.range.replace(/bytes=/, "").split("-")[0], 10) : 0);
+				await collection.updateOne({ token }, { $set: { locked: false } });
+				logger.info(`🔓 Document unlocked for token: ${token}`);
+			} catch (err) {
+				logger.error(`❌ Failed to unlock document: ${err}`);
+			}
+		};
 
-				// Update the tracking field
+		// Helper function to track download progress
+		const updateDownloadProgress = async (position: number) => {
+			try {
+				// Update downloadedBytes to track progress
 				await collection.updateOne(
 					{ token },
 					{
 						$set: {
-							locked: false,
-							highestBytePosition: newPosition
+							lastDownloadPosition: position,
+							// Update the progress percentage
+							downloadProgress: Math.round((position / fileSize) * 100)
 						}
 					}
 				);
-
-				// Calculate coverage and check if download should be considered complete
-				const coverage = newPosition / fileSize;
-				if (coverage > 0.98) { // If we've downloaded >98% of the file
-					logger.info(`🔍 Download appears to be complete (${Math.round(coverage * 100)}% downloaded)`);
-					await markAsCompleted();
-				} else {
-					logger.info(`🔓 Document unlocked for token: ${token} (${Math.round(coverage * 100)}% downloaded)`);
-				}
 			} catch (err) {
-				logger.error(`❌ Failed to unlock document: ${err}`);
+				logger.error(`❌ Failed to update download progress: ${err}`);
 			}
 		};
 
@@ -157,15 +154,18 @@ export default {
 				const finalEnd = Math.min(end, fileSize - 1);
 				const chunkSize = finalEnd - start + 1;
 
-				// Update highest position requested in the document
-				if (!document.highestBytePosition || start > document.highestBytePosition) {
-					await collection.updateOne({ token }, { $set: { highestBytePosition: finalEnd } });
-				}
+				// Calculate progress percentage
+				const progressPercentage = Math.round((start / fileSize) * 100);
 
-				// Calculate percentage completed
-				const percentComplete = Math.round((start / fileSize) * 100);
+				// A request is considered complete if it ends at the last byte of the file
+				// We don't care if it's sequential or from where it started - if we're serving
+				// the last byte, the client has requested the entire file (even if in chunks)
+				const isCompletionRequest = finalEnd >= fileSize - 1;
 
-				logger.info(`📥 Serving range: ${start}-${finalEnd}/${fileSize} (${percentComplete}% already downloaded)`);
+				logger.info(`📥 Serving range: ${start}-${finalEnd}/${fileSize} (${progressPercentage}% already downloaded)`);
+
+				// Update progress in the database
+				await updateDownloadProgress(finalEnd);
 
 				// Send partial content
 				res.status(206);
@@ -175,10 +175,10 @@ export default {
 				// Create stream
 				stream = createReadStream(file, { start, end: finalEnd });
 
-				// If this range completes the file (directly or we've received enough chunks)
-				if (finalEnd === fileSize - 1 && (start === 0 || percentComplete > 98)) {
-					logger.info(`⚠️ This appears to be the final range request (${percentComplete}% → 100%)`);
+				// If this range includes the end of the file, mark as completed when done
+				if (isCompletionRequest) {
 					res.on("finish", markAsCompleted);
+					logger.info(`⚠️ This appears to be a completion request (ends at byte ${finalEnd}/${fileSize - 1})`);
 				} else {
 					res.on("finish", unlockDocument);
 				}
