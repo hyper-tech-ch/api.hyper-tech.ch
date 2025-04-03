@@ -63,7 +63,7 @@ export default {
 		}
 
 		// Lock the token for download
-		await collection.updateOne({ token }, { $set: { locked: true } });
+		await collection.updateOne({ token }, { $set: { locked: false } });
 
 		const movieFileName = document.fileName || "Heuried.mp4";
 		const file = await findMovieFile(movieFileName);
