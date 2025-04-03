@@ -1,26 +1,21 @@
 import { RouteHandler } from "exports/route";
 import { NextFunction, Request, Response } from "express";
 import { GetCollection } from "../../helpers/database";
-import { readDirRecursive } from "../../helpers/readDirRecursive";
-import path from "path";
 import cors from "cors";
 import { getLogger } from "../../helpers/logger";
-import { statSync } from "fs";
-import rangeParser from "range-parser";
-import fs from "fs";
 import { clamp } from "lodash";
 
 export default {
-	Method: "post",
-	Path: "/movies/progress",
+	Method: "post", // Keep as POST since your client is using POST
+	Path: "/movies/progress", // Keep the path as /movies/progress
 	Priority: 0,
 
 	AuthorizationGroup: null,
 	Middleware: [
 		cors({
 			origin: "*",
-			methods: ["GET"],
-			exposedHeaders: ["Content-Disposition", "Content-Length", "Content-Range", "Accept-Ranges"],
+			methods: ["POST"], // Change to POST to match your client request
+			credentials: true
 		}),
 	],
 
@@ -37,7 +32,7 @@ export default {
 
 		// Optionally store this in your database
 		const collection = await GetCollection("movie_links");
-		if(progress === "100") {
+		if (progress === "100") {
 			await collection.updateOne({ token }, {
 				$set: {
 					locked: false,
