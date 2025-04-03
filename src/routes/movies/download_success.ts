@@ -46,6 +46,7 @@ export default {
 				$set: {
 					locked: false,
 					progress: -1,
+					downloadedAt: null,
 					errorAt: new Date()
 				}
 			});
