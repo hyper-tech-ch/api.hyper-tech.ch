@@ -75,7 +75,7 @@ export default {
 		} else {
 			await collection.updateOne({ token }, {
 				$set: {
-					locked: true,
+					locked: false,
 					progress: clamp(parseInt(progress as string, 10), 0, 100),
 				}
 			});
