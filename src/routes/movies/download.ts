@@ -75,6 +75,12 @@ export default {
 
 		const stats = statSync(file);
 		const fileSize = stats.size;
+		const etag = `"${stats.mtime.getTime().toString(16)}"`;
+
+		res.setHeader("ETag", etag);
+		if (req.headers['if-none-match'] === etag) {
+			return res.status(304).end();
+		}
 
 		if (fileSize === 0) {
 			await collection.updateOne({ token }, { $set: { locked: false } });
@@ -114,6 +120,7 @@ export default {
 			logger.info(`📏 IP ${req.ip} requested bytes ${start}-${end}/${fileSize} of ${movieFileName}, token: ${token}`);
 		} else {
 			res.status(200);
+			res.setHeader('Content-Length', fileSize);
 		}
 
 		const contentLength = end - start + 1;
